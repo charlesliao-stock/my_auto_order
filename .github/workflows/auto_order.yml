@@ -1,0 +1,37 @@
+name: KMUH Auto Meal Order
+
+on:
+  schedule:
+    # 範例：台灣時間週一至週五的中午 12 點 (UTC 04:00) 執行訂餐
+    - cron: '0 4 * * 1-5'
+  workflow_dispatch: # 允許在 GitHub 頁面手動點擊測試
+
+jobs:
+  order:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies (Tesseract OCR)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Auto Order Script
+        env:
+          KMUH_USERNAME: ${{ secrets.KMUH_USERNAME }}
+          KMUH_PASSWORD: ${{ secrets.KMUH_PASSWORD }}
+          MEAL_COUNT: ${{ secrets.MEAL_COUNT }}
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+        run: |
+          python order.py
