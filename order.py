@@ -1,33 +1,36 @@
 import os
 import time
 from playwright.sync_api import sync_playwright
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
-import requests
 
+# 從 GitHub Secrets 讀取設定
 USERNAME = os.environ.get("KMUH_USERNAME")
 PASSWORD = os.environ.get("KMUH_PASSWORD")
-MEAL_COUNT = os.environ.get("MEAL_COUNT", "1")
-LINE_NOTIFY_TOKEN = os.environ.get("LINE_NOTIFY_TOKEN")
-
-def send_notification(message):
-    """發送 LINE Notify 通知"""
-    if not LINE_NOTIFY_TOKEN:
-        print(f"[通知] {message}")
-        return
-    url = "https://notify-api.line.me/api/notify"
-    headers = {"Authorization": f"Bearer {LINE_NOTIFY_TOKEN}"}
-    data = {"message": message}
-    try:
-        requests.post(url, headers=headers, data=data)
-    except Exception as e:
-        print(f"發送 LINE 通知失敗: {e}")
+MEAL_COUNT = os.environ.get("MEAL_COUNT", "1")  # 預設份數為 1
 
 def solve_captcha(image_path):
-    """使用 OCR 辨識驗證碼圖片檔案"""
+    """使用優化的影像前處理與 OCR 辨識驗證碼"""
     try:
         img = Image.open(image_path)
-        img = img.convert('L').point(lambda x: 0 if x < 140 else 255, '1')
+        
+        # 1. 圖片放大 3 倍以提升辨識率
+        img = img.resize((img.width * 3, img.height * 3), Image.Resampling.LANCZOS)
+        
+        # 2. 轉為灰階
+        img = img.convert('L')
+        
+        # 3. 增強對比度
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(2.0)
+        
+        # 4. 二值化處理
+        img = img.point(lambda x: 0 if x < 150 else 255, '1')
+        
+        # 5. 中值濾波降噪
+        img = img.filter(ImageFilter.MedianFilter(size=3))
+        
+        # 6. OCR 辨識設定 (限制大小寫英文與數字 4 碼)
         config = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 --psm 8'
         text = pytesseract.image_to_string(img, config=config).strip()
         return text.replace(" ", "")[:4]
@@ -49,7 +52,7 @@ def run_automation():
             try:
                 print(f"--- 開始第 {attempt} 次嘗試訂餐 ---")
                 
-                # 1. 前往高醫單一入口網 (使用您指定的正確登入網址)
+                # 1. 前往高醫單一入口網
                 page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_selector("#username", timeout=30000)
                 page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
@@ -63,6 +66,8 @@ def run_automation():
                 
                 if len(captcha_code) != 4:
                     print("驗證碼長度不正確，重新整理重試...")
+                    captcha_img.click()
+                    page.wait_for_timeout(1000)
                     continue
 
                 # 3. 填入帳號、密碼與驗證碼
@@ -76,7 +81,7 @@ def run_automation():
                 page.click("#login")
                 page.wait_for_timeout(4000)
 
-                # 檢查是否登入失敗（若帳號欄位還在，代表還留在登入頁）
+                # 檢查是否登入失敗
                 if page.locator("#username").is_visible():
                     print("登入失敗（可能驗證碼錯誤或帳密有誤），重試中...")
                     page.screenshot(path=f"screenshots/login_failed_{attempt}.png")
@@ -85,28 +90,48 @@ def run_automation():
                 print("登入成功！")
                 page.screenshot(path=f"screenshots/3_logged_in.png")
 
-                # 5. 透過轉向網址進入訂餐系統
+                # 5. 透過轉向網址進入營養部訂餐系統
                 tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
                 page.goto(tran_url, wait_until="domcontentloaded", timeout=30000)
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
-                # 6. 選擇午餐 (shift_no = 2)
+                # 6. 餐別選擇午餐 (shift_no = 2)
                 page.select_option("select[name='shift_no']", "2")
                 page.wait_for_timeout(2000)
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
 
-                # 7. 進入訂餐畫面後，填寫分機與份數
+                # 7. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
                 try:
-                    page.fill("input[name='ext']", "6551")
-                    page.fill("input[name='qty']", MEAL_COUNT)
-                except Exception:
-                    pass
-                
+                    page.check("input[name='classkind'][value='266']")
+                    page.wait_for_timeout(2000)
+                except Exception as e:
+                    print(f"選擇餐盒類別發生錯誤: {e}")
+
+                # 8. 填寫分機資料 (depttel = 6551) 與份數
+                # 依據 HTML 結構，日期下拉選單名稱格式如 odrpcs年份日期，此處尋找頁面中可用的訂餐數量下拉選單或直接填寫
+                try:
+                    page.fill("input[name='depttel']", "6551")
+                    
+                    # 尋找當前頁面啟用的訂餐數量下拉選單並選擇份數
+                    qty_selects = page.locator("select[name^='odrpcs']")
+                    if qty_selects.count() > 0:
+                        for i in range(qty_selects.count()):
+                            sel = qty_selects.nth(i)
+                            if not sel.get_attribute("disabled"):
+                                sel.select_option(MEAL_COUNT)
+                                break
+                except Exception as e:
+                    print(f"填寫分機或份數時發生錯誤: {e}")
+
                 page.screenshot(path=f"screenshots/6_ready_to_submit.png")
 
-                msg = f"【高醫員工餐自動訂餐執行完成】\n已成功通過驗證並送出訂餐頁面。"
-                print(msg)
-                send_notification(msg)
+                # 9. 點擊送出按鈕 (B2)
+                # 若需要正式送出，可將下方註解取消；測試期間可先保留註解以檢查截圖畫面
+                # page.click("input[name='B2']")
+                # page.wait_for_timeout(3000)
+                # page.screenshot(path=f"screenshots/7_submitted.png")
+
+                print("【高醫員工餐自動訂餐流程執行完成】")
                 browser.close()
                 return True
 
@@ -114,8 +139,7 @@ def run_automation():
                 print(f"第 {attempt} 次執行發生錯誤: {e}")
                 page.screenshot(path=f"screenshots/error_attempt_{attempt}.png")
                 if attempt == max_retries:
-                    err_msg = f"【高醫員工餐自動訂餐失敗】已達最大重試次數，錯誤原因: {e}"
-                    send_notification(err_msg)
+                    print(f"【高醫員工餐自動訂餐失敗】已達最大重試次數，錯誤原因: {e}")
                     browser.close()
                     raise e
                 time.sleep(3)
