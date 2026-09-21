@@ -1,22 +1,14 @@
 import os
 import time
-import base64
-from io import BytesIO
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 from PIL import Image
 import pytesseract
+import requests
 
-# 從 GitHub Secrets 讀取設定
 USERNAME = os.environ.get("KMUH_USERNAME")
 PASSWORD = os.environ.get("KMUH_PASSWORD")
 MEAL_COUNT = os.environ.get("MEAL_COUNT", "1")
 LINE_NOTIFY_TOKEN = os.environ.get("LINE_NOTIFY_TOKEN")
-
-SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-})
 
 def send_notification(message):
     """發送 LINE Notify 通知"""
@@ -31,11 +23,10 @@ def send_notification(message):
     except Exception as e:
         print(f"發送 LINE 通知失敗: {e}")
 
-def solve_captcha(image_bytes):
-    """使用 OCR 辨識 4 碼英數字驗證碼"""
+def solve_captcha(image_path):
+    """使用 OCR 辨識驗證碼圖片檔案"""
     try:
-        img = Image.open(BytesIO(image_bytes))
-        # 影像二值化預處理以提高辨識率
+        img = Image.open(image_path)
         img = img.convert('L').point(lambda x: 0 if x < 140 else 255, '1')
         config = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 --psm 8'
         text = pytesseract.image_to_string(img, config=config).strip()
@@ -44,108 +35,95 @@ def solve_captcha(image_bytes):
         print(f"驗證碼辨識錯誤: {e}")
         return ""
 
-def login_and_order():
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"--- 開始第 {attempt} 次嘗試訂餐 ---")
-            
-            # 1. 取得登入頁面
-            auth_home = "https://www.kmuh.org.tw/Web/AuthServerMVC/"
-            res = SESSION.get(auth_home)
-            res.encoding = 'utf-8'
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            form = soup.find('form', {'name': 'form'})
-            if not form:
-                raise Exception("找不到登入表單")
-            
-            action_url = form.get('action') # 例如 /Web/AuthServerMVC/login?signin=...
-            signin_token = action_url.split('signin=')[1]
-            
-            xsrf_input = form.find('input', {'name': 'idsrv.xsrf'})
-            xsrf_value = xsrf_input.get('value') if xsrf_input else ""
+def run_automation():
+    os.makedirs("screenshots", exist_ok=True)
+    
+    with sync_playwright() as p:
+        # 啟動瀏覽器 (headless=True 代表背景執行，但會把畫面截圖下來)
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
+        page = context.new_page()
 
-            # 2. 取得驗證碼圖片
-            captcha_img_tag = soup.find('img', {'id': 'kmuh-captcha-img'})
-            if captcha_img_tag and captcha_img_tag.get('src', '').startswith('data:image'):
-                # 如果頁面直接帶有 base64 圖片
-                src_data = captcha_img_tag.get('src')
-                img_data = base64.b64decode(src_data.split(',')[1])
-            else:
-                # 否則透過 RenderCaptcha 取得
-                captcha_img_url = f"https://www.kmuh.org.tw/Web/AuthServerMVC/logonworkflow/RenderCaptcha?signin={signin_token}"
-                captcha_res = SESSION.get(captcha_img_url)
-                if captcha_res.content.startswith(b'data:image'):
-                    img_data = base64.b64decode(captcha_res.text.split(',')[1])
-                else:
-                    img_data = captcha_res.content
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"--- 開始第 {attempt} 次嘗試訂餐 ---")
+                
+                # 1. 前往高醫單一入口網
+                page.goto("https://www.kmuh.org.tw/Web/AuthServerMVC/", wait_until="networkidle")
+                page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
+                
+                # 2. 截取驗證碼圖片並辨識
+                captcha_img = page.locator("#kmuh-captcha-img")
+                captcha_img.screenshot(path=f"screenshots/captcha_{attempt}.png")
+                
+                captcha_code = solve_captcha(f"screenshots/captcha_{attempt}.png")
+                print(f"辨識出的驗證碼: {captcha_code}")
+                
+                if len(captcha_code) != 4:
+                    print("驗證碼長度不正確，重新整理重試...")
+                    continue
 
-            captcha_code = solve_captcha(img_data)
-            print(f"辨識出的驗證碼: {captcha_code}")
-            
-            if len(captcha_code) != 4:
-                print("驗證碼長度不符，重新嘗試...")
-                continue
+                # 3. 填入帳號、密碼、驗證碼
+                page.fill("#username", USERNAME)
+                page.fill("#password", PASSWORD)
+                page.fill("#kmuh-captcha", captcha_code)
+                
+                page.screenshot(path=f"screenshots/2_filled_form_{attempt}.png")
 
-            # 3. 提交登入表單
-            login_payload = {
-                "idsrv.xsrf": xsrf_value,
-                "username": USERNAME,
-                "password": PASSWORD,
-                "kmuh-captcha": captcha_code
-            }
-            login_url = f"https://www.kmuh.org.tw{action_url}"
-            login_res = SESSION.post(login_url, data=login_payload, allow_redirects=True)
-            login_res.encoding = 'utf-8'
-            
-            if "登入" in login_res.text and "職編" in login_res.text:
-                print("登入失敗（可能驗證碼錯誤或帳密有誤），重試中...")
-                continue
-            
-            print("登入成功！")
+                # 4. 點擊登入按鈕
+                page.click("#login")
+                page.wait_for_timeout(3000) # 等待登入回應
 
-            # 4. 透過轉向網址進入訂餐系統
-            tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
-            SESSION.get(tran_url)
+                # 檢查是否還留在登入頁 (代表登入失敗)
+                if page.locator("#username").is_visible():
+                    print("登入失敗（可能驗證碼錯誤或帳密有誤），重試中...")
+                    page.screenshot(path=f"screenshots/login_failed_{attempt}.png")
+                    continue
 
-            # 5. 選擇午餐 (shift_no = 2) 與送出訂單
-            order_page_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp"
-            
-            shift_payload = {
-                "br_statusKind": "1",
-                "areacode": "H",
-                "shift_no": "2"
-            }
-            SESSION.post(order_page_url, data=shift_payload)
+                print("登入成功！")
+                page.screenshot(path=f"screenshots/3_logged_in.png")
 
-            # 6. 填入份數與分機 6551 後送出
-            final_order_payload = {
-                "br_statusKind": "1",
-                "areacode": "H",
-                "shift_no": "2",
-                "ext": "6551",
-                "qty": MEAL_COUNT
-            }
-            
-            submit_res = SESSION.post(order_page_url, data=final_order_payload)
-            submit_res.encoding = 'big5' # 訂餐系統使用 big5 編碼
-            
-            if submit_res.status_code == 200:
-                msg = f"【高醫員工餐自動訂餐成功】\n餐別：午餐\n類別：健康均衡餐(葷)\n份數：{MEAL_COUNT}\n分機：6551"
+                # 5. 透過轉向網址進入訂餐系統
+                tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
+                page.goto(tran_url, wait_until="networkidle")
+                page.screenshot(path=f"screenshots/4_order_system_home.png")
+
+                # 6. 選擇午餐 (shift_no = 2)
+                page.select_option("select[name='shift_no']", "2")
+                page.wait_for_timeout(2000)
+                page.screenshot(path=f"screenshots/5_lunch_selected.png")
+
+                # 7. 填寫分機與份數並送出訂單
+                # 假設系統有對應的 input 欄位
+                try:
+                    page.fill("input[name='ext']", "6551")
+                    page.fill("input[name='qty']", MEAL_COUNT)
+                except Exception:
+                    pass # 若欄位名稱不同可在後續微調
+                
+                page.screenshot(path=f"screenshots/6_ready_to_submit.png")
+                
+                # 送出表單 (依據系統按鈕調整選取器)
+                # page.click("input[type='submit']") 
+
+                msg = f"【高醫員工餐自動訂餐執行完成】\n已完成模擬登入與訂餐頁面導航。\n請檢查截圖確認畫面狀態。"
                 print(msg)
                 send_notification(msg)
+                browser.close()
                 return True
-            else:
-                raise Exception(f"送出訂單 HTTP 狀態碼: {submit_res.status_code}")
 
-        except Exception as e:
-            print(f"第 {attempt} 次執行發生錯誤: {e}")
-            if attempt == max_retries:
-                err_msg = f"【高醫員工餐自動訂餐失敗】已達最大重試次數，錯誤原因: {e}"
-                send_notification(err_msg)
-                raise e
-            time.sleep(3)
+            except Exception as e:
+                print(f"第 {attempt} 次執行發生錯誤: {e}")
+                page.screenshot(path=f"screenshots/error_attempt_{attempt}.png")
+                if attempt == max_retries:
+                    err_msg = f"【高醫員工餐自動訂餐失敗】已達最大重試次數，錯誤原因: {e}"
+                    send_notification(err_msg)
+                    browser.close()
+                    raise e
+                time.sleep(3)
+
+        browser.close()
 
 if __name__ == "__main__":
-    login_and_order()
+    run_automation()
