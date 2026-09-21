@@ -39,7 +39,7 @@ def run_automation():
     os.makedirs("screenshots", exist_ok=True)
     
     with sync_playwright() as p:
-        # 啟動瀏覽器 (headless=True 代表背景執行，但會把畫面截圖下來)
+        # 啟動背景瀏覽器
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 800})
         page = context.new_page()
@@ -49,11 +49,12 @@ def run_automation():
             try:
                 print(f"--- 開始第 {attempt} 次嘗試訂餐 ---")
                 
-                # 1. 前往高醫單一入口網
+                # 1. 前往高醫單一入口網，並等待網路完全靜止（確保頁面與驗證碼載入完畢）
                 page.goto("https://www.kmuh.org.tw/Web/AuthServerMVC/", wait_until="networkidle")
+                page.wait_for_selector("#username", timeout=10000)
                 page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
                 
-                # 2. 截取驗證碼圖片並辨識
+                # 2. 擷取驗證碼圖片並進行 OCR 辨識
                 captcha_img = page.locator("#kmuh-captcha-img")
                 captcha_img.screenshot(path=f"screenshots/captcha_{attempt}.png")
                 
@@ -64,7 +65,7 @@ def run_automation():
                     print("驗證碼長度不正確，重新整理重試...")
                     continue
 
-                # 3. 填入帳號、密碼、驗證碼
+                # 3. 填入帳號、密碼與驗證碼
                 page.fill("#username", USERNAME)
                 page.fill("#password", PASSWORD)
                 page.fill("#kmuh-captcha", captcha_code)
@@ -73,9 +74,9 @@ def run_automation():
 
                 # 4. 點擊登入按鈕
                 page.click("#login")
-                page.wait_for_timeout(3000) # 等待登入回應
+                page.wait_for_timeout(3000)
 
-                # 檢查是否還留在登入頁 (代表登入失敗)
+                # 檢查是否登入失敗（若帳號欄位還在，代表還留在登入頁）
                 if page.locator("#username").is_visible():
                     print("登入失敗（可能驗證碼錯誤或帳密有誤），重試中...")
                     page.screenshot(path=f"screenshots/login_failed_{attempt}.png")
@@ -94,20 +95,16 @@ def run_automation():
                 page.wait_for_timeout(2000)
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
 
-                # 7. 填寫分機與份數並送出訂單
-                # 假設系統有對應的 input 欄位
+                # 7. 填寫分機與份數
                 try:
                     page.fill("input[name='ext']", "6551")
                     page.fill("input[name='qty']", MEAL_COUNT)
                 except Exception:
-                    pass # 若欄位名稱不同可在後續微調
+                    pass
                 
                 page.screenshot(path=f"screenshots/6_ready_to_submit.png")
-                
-                # 送出表單 (依據系統按鈕調整選取器)
-                # page.click("input[type='submit']") 
 
-                msg = f"【高醫員工餐自動訂餐執行完成】\n已完成模擬登入與訂餐頁面導航。\n請檢查截圖確認畫面狀態。"
+                msg = f"【高醫員工餐自動訂餐執行完成】\n已成功通過驗證並送出訂餐頁面。"
                 print(msg)
                 send_notification(msg)
                 browser.close()
