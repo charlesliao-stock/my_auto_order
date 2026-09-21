@@ -49,9 +49,9 @@ def run_automation():
             try:
                 print(f"--- 開始第 {attempt} 次嘗試訂餐 ---")
                 
-                # 1. 前往高醫單一入口網，並等待網路完全靜止（確保頁面與驗證碼載入完畢）
-                page.goto("https://www.kmuh.org.tw/Web/AuthServerMVC/", wait_until="networkidle")
-                page.wait_for_selector("#username", timeout=10000)
+                # 1. 前往高醫單一入口網 (使用您指定的正確登入網址)
+                page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_selector("#username", timeout=30000)
                 page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
                 
                 # 2. 擷取驗證碼圖片並進行 OCR 辨識
@@ -74,7 +74,7 @@ def run_automation():
 
                 # 4. 點擊登入按鈕
                 page.click("#login")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(4000)
 
                 # 檢查是否登入失敗（若帳號欄位還在，代表還留在登入頁）
                 if page.locator("#username").is_visible():
@@ -87,7 +87,7 @@ def run_automation():
 
                 # 5. 透過轉向網址進入訂餐系統
                 tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
-                page.goto(tran_url, wait_until="networkidle")
+                page.goto(tran_url, wait_until="domcontentloaded", timeout=30000)
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
                 # 6. 選擇午餐 (shift_no = 2)
@@ -95,7 +95,7 @@ def run_automation():
                 page.wait_for_timeout(2000)
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
 
-                # 7. 填寫分機與份數
+                # 7. 進入訂餐畫面後，填寫分機與份數
                 try:
                     page.fill("input[name='ext']", "6551")
                     page.fill("input[name='qty']", MEAL_COUNT)
