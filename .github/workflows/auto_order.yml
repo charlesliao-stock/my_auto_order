@@ -30,7 +30,7 @@ jobs:
 
       - name: Run Auto Order Script
         env:
-          KMUCH_USERNAME: ${{ secrets.KMUH_USERNAME }}
+          KMUH_USERNAME: ${{ secrets.KMUH_USERNAME }}
           KMUH_PASSWORD: ${{ secrets.KMUH_PASSWORD }}
           MEAL_COUNT: ${{ secrets.MEAL_COUNT }}
           LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
