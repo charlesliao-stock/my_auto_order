@@ -1,10 +1,9 @@
-name: KMUH Auto Meal Order
+name: KMUH Auto Meal Order with Screenshots
 
 on:
   schedule:
-    # 範例：台灣時間週一至週五的中午 12 點 (UTC 04:00) 執行訂餐
     - cron: '0 4 * * 1-5'
-  workflow_dispatch: # 允許在 GitHub 頁面手動點擊測試
+  workflow_dispatch:
 
 jobs:
   order:
@@ -18,7 +17,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install system dependencies (Tesseract OCR)
+      - name: Install system dependencies & Tesseract OCR
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
@@ -26,12 +25,21 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
 
       - name: Run Auto Order Script
         env:
-          KMUH_USERNAME: ${{ secrets.KMUH_USERNAME }}
+          KMUCH_USERNAME: ${{ secrets.KMUH_USERNAME }}
           KMUH_PASSWORD: ${{ secrets.KMUH_PASSWORD }}
           MEAL_COUNT: ${{ secrets.MEAL_COUNT }}
           LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
         run: |
           python order.py
+
+      - name: Upload Screenshots as Artifacts
+        if: always() # 無論成功或失敗都上傳截圖，方便你檢視畫面
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-screenshots
+          path: screenshots/
