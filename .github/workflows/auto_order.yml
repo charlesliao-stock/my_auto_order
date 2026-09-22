@@ -34,7 +34,6 @@ jobs:
           KMUH_USERNAME: ${{ secrets.KMUH_USERNAME }}
           KMUH_PASSWORD: ${{ secrets.KMUH_PASSWORD }}
           MEAL_COUNT: ${{ secrets.MEAL_COUNT }}
-          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
         run: |
           python order.py
 
@@ -44,3 +43,35 @@ jobs:
         with:
           name: execution-screenshots
           path: screenshots/
+
+      - name: Send LINE Notification (Success)
+        if: success()
+        run: |
+          curl -X POST https://api.line.me/v2/bot/message/push \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
+          -d '{
+            "to": "${{ secrets.LINE_USER_ID }}",
+            "messages": [
+              {
+                "type": "text",
+                "text": "✨ 【高醫自動訂餐】執行成功！\n專案：${{ github.repository }}\n狀態：已完成自動訂餐流程\n詳細畫面請至 GitHub Actions 檢視"
+              }
+            ]
+          }'
+
+      - name: Send LINE Notification (Failure)
+        if: failure()
+        run: |
+          curl -X POST https://api.line.me/v2/bot/message/push \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" \
+          -d '{
+            "to": "${{ secrets.LINE_USER_ID }}",
+            "messages": [
+              {
+                "type": "text",
+                "text": "❌ 【高醫自動訂餐】執行失敗！\n專案：${{ github.repository }}\n請檢查執行記錄與截圖：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              }
+            ]
+          }'
