@@ -205,22 +205,26 @@ def run_automation():
                 log("步驟1 登入", "OK", log_lines=log_lines)
                 page.screenshot(path=f"screenshots/3_logged_in.png")
 
-                # ---------- 步驟 2：轉址至營養部訂餐系統 ----------
-                tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
-                try:
-                    page.goto(tran_url, wait_until="domcontentloaded", timeout=30000)
-                    # 轉址後主動確認訂餐頁的關鍵欄位真的有出現，而不是只假設 goto 成功就代表頁面正確，
-                    # 因為 goto 只代表「有載入某個頁面」，不保證是我們要的訂餐頁（有可能被導回登入頁、
-                    # 或顯示系統錯誤頁）
-                    page.wait_for_selector("select[name='shift_no']", timeout=15000)
-                    step_status["redirect"] = "成功"
-                    log("步驟2 轉址至訂餐系統", "OK", log_lines=log_lines)
-                except Exception as e:
-                    step_status["redirect"] = f"失敗：轉址後找不到訂餐頁的餐別選單（shift_no），原始錯誤：{e}"
-                    log("步驟2 轉址至訂餐系統", "FAIL", f"找不到 shift_no 選單，可能未成功轉址：{e}", log_lines=log_lines)
-                    page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
-                    _write_log(attempt, log_lines)
-                    raise
+# ---------- 步驟 2：直接前往訂餐系統主網址 ----------
+tran_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
+try:
+    # 同時將 timeout 放大到 60 秒，確保網路較慢時有足夠時間載入
+    page.goto(tran_url, wait_until="domcontentloaded", timeout=60000)
+    
+    # 檢查是否被反向導回登入頁（如果被導回登入頁，代表直接連線行不通，必須走原本的 TranUrl）
+    if "login" in page.url.lower():
+        log("步驟2 轉址", "FAIL", "直接訪問網址被導回登入頁，代表 Session 驗證失效", log_lines=log_lines)
+        raise Exception("未登入狀態，被導回登入頁")
+
+    page.wait_for_selector("select[name='shift_no']", timeout=15000)
+    step_status["redirect"] = "成功"
+    log("步驟2 直接進入訂餐系統", "OK", log_lines=log_lines)
+except Exception as e:
+    step_status["redirect"] = f"失敗：無法直接進入訂餐頁，原始錯誤：{e}"
+    log("步驟2 直接進入訂餐系統", "FAIL", str(e), log_lines=log_lines)
+    page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
+    _write_log(attempt, log_lines)
+    raise
 
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
