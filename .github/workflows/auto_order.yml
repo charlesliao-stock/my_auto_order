@@ -3,7 +3,7 @@ name: KMUH Auto Meal Order with Screenshots
 on:
   schedule:
     # 台灣時間週一～週五 00:00 (相當於 UTC 週日～週四 16:00)
-    - cron: '0 16 * * 0-4'
+    - cron: '0 19 * * 0-4'
   workflow_dispatch:
 
 jobs:
