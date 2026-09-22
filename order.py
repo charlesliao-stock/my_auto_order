@@ -1,5 +1,7 @@
 import os
+import re
 import time
+from collections import Counter
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
@@ -9,31 +11,110 @@ USERNAME = os.environ.get("KMUH_USERNAME")
 PASSWORD = os.environ.get("KMUH_PASSWORD")
 MEAL_COUNT = os.environ.get("MEAL_COUNT", "2")  # 預設份數為 2
 
+_VALID_CAPTCHA_RE = re.compile(r"^[A-Za-z0-9]{4}$")
+
+
+def _otsu_threshold(gray_img):
+    """純 Python 實作 Otsu 自動門檻值 (不依賴 numpy/OpenCV)，
+    比固定門檻值 (例如寫死 150) 更能適應每張驗證碼圖片亮度不一致的狀況。"""
+    histogram = gray_img.histogram()
+    total = sum(histogram)
+    if total == 0:
+        return 150  # 保底值
+
+    sum_total = sum(i * histogram[i] for i in range(256))
+    sum_bg, weight_bg = 0.0, 0
+    max_variance, best_threshold = 0.0, 150
+
+    for t in range(256):
+        weight_bg += histogram[t]
+        if weight_bg == 0:
+            continue
+        weight_fg = total - weight_bg
+        if weight_fg == 0:
+            break
+        sum_bg += t * histogram[t]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+        variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if variance > max_variance:
+            max_variance = variance
+            best_threshold = t
+
+    return best_threshold
+
+
+def _preprocess_variants(image_path):
+    """從同一張驗證碼原圖，產生多種前處理版本，增加至少一種能被 OCR 正確辨識的機率。"""
+    base = Image.open(image_path)
+    # 放大 4 倍，字元邊緣更清楚，小圖放大有助於 tesseract 辨識筆畫
+    base = base.resize((base.width * 4, base.height * 4), Image.Resampling.LANCZOS)
+    gray = base.convert('L')
+
+    # 對比增強，讓文字與底色更好分離
+    gray = ImageEnhance.Contrast(gray).enhance(2.0)
+    gray = ImageEnhance.Sharpness(gray).enhance(2.0)
+
+    otsu_t = _otsu_threshold(gray)
+
+    variants = []
+
+    # 變體 1：Otsu 自動門檻二值化 + 中值濾波去雜訊
+    bin_otsu = gray.point(lambda x, t=otsu_t: 0 if x < t else 255, '1')
+    bin_otsu = bin_otsu.filter(ImageFilter.MedianFilter(size=3))
+    variants.append(bin_otsu)
+
+    # 變體 2：反相版本 (有些驗證碼字比底色淺，反過來二值化效果更好)
+    bin_otsu_inv = gray.point(lambda x, t=otsu_t: 255 if x < t else 0, '1')
+    bin_otsu_inv = bin_otsu_inv.filter(ImageFilter.MedianFilter(size=3))
+    variants.append(bin_otsu_inv)
+
+    # 變體 3：原本固定門檻 150 的版本，保留作為備援（對某些圖片可能反而比 Otsu 準）
+    bin_fixed = gray.point(lambda x: 0 if x < 150 else 255, '1')
+    bin_fixed = bin_fixed.filter(ImageFilter.MedianFilter(size=3))
+    variants.append(bin_fixed)
+
+    # 變體 4：Otsu 二值化 + 形態學開運算 (先侵蝕再膨脹)，去除細小雜點/干擾線
+    bin_denoised = bin_otsu.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+    variants.append(bin_denoised)
+
+    return variants
+
+
 def solve_captcha(image_path):
-    """使用優化的影像前處理與 OCR 辨識驗證碼"""
+    """使用多種影像前處理 + 多種 OCR 設定，取多數決結果，以提升驗證碼辨識率"""
     try:
-        img = Image.open(image_path)
-        
-        # 1. 圖片放大 3 倍以提升辨識率
-        img = img.resize((img.width * 3, img.height * 3), Image.Resampling.LANCZOS)
-        
-        # 2. 轉為灰階
-        img = img.convert('L')
-        
-        # 3. 增強對比度
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(2.0)
-        
-        # 4. 二值化處理
-        img = img.point(lambda x: 0 if x < 150 else 255, '1')
-        
-        # 5. 中值濾波降噪
-        img = img.filter(ImageFilter.MedianFilter(size=3))
-        
-        # 6. OCR 辨識設定 (限制大小寫英文與數字 4 碼)
-        config = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 --psm 8'
-        text = pytesseract.image_to_string(img, config=config).strip()
-        return text.replace(" ", "")[:4]
+        variants = _preprocess_variants(image_path)
+
+        # 限制字元集為大小寫英文與數字 4 碼；同時嘗試多個 psm 模式，
+        # 因為不同 psm（單行文字/單詞/稀疏文字）對不同驗證碼字型的效果不一
+        psm_modes = [8, 7, 13]
+        char_whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+        votes = Counter()
+        for variant_img in variants:
+            for psm in psm_modes:
+                config = f'-c tessedit_char_whitelist={char_whitelist} --psm {psm}'
+                try:
+                    raw = pytesseract.image_to_string(variant_img, config=config)
+                except Exception:
+                    continue
+                candidate = raw.strip().replace(" ", "").replace("\n", "")
+                if _VALID_CAPTCHA_RE.match(candidate):
+                    votes[candidate] += 1
+
+        if votes:
+            best, best_count = votes.most_common(1)[0]
+            print(f"驗證碼候選結果: {dict(votes)} -> 採用: {best}")
+            return best
+
+        # 所有嘗試都沒有產生「剛好 4 碼英數字」的結果，
+        # 退而求其次回傳第一種前處理、psm=8 的原始辨識結果（可能長度不對，交由外層重試判斷）
+        fallback_config = f'-c tessedit_char_whitelist={char_whitelist} --psm 8'
+        fallback_text = pytesseract.image_to_string(variants[0], config=fallback_config).strip()
+        fallback = fallback_text.replace(" ", "")[:4]
+        print(f"驗證碼多數決無結果，使用備援辨識: {fallback}")
+        return fallback
     except Exception as e:
         print(f"驗證碼辨識錯誤: {e}")
         return ""
