@@ -205,43 +205,33 @@ def run_automation():
                 log("步驟1 登入", "OK", log_lines=log_lines)
                 page.screenshot(path=f"screenshots/3_logged_in.png")
 
-# ---------- 步驟 2：直接前往訂餐系統主網址 ----------
-tran_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
-try:
-    # 同時將 timeout 放大到 60 秒，確保網路較慢時有足夠時間載入
-    page.goto(tran_url, wait_until="domcontentloaded", timeout=60000)
-    
-    # 檢查是否被反向導回登入頁（如果被導回登入頁，代表直接連線行不通，必須走原本的 TranUrl）
-    if "login" in page.url.lower():
-        log("步驟2 轉址", "FAIL", "直接訪問網址被導回登入頁，代表 Session 驗證失效", log_lines=log_lines)
-        raise Exception("未登入狀態，被導回登入頁")
+                # ---------- 步驟 2：直接前往訂餐系統主網址 ----------
+                tran_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
+                try:
+                    page.goto(tran_url, wait_until="domcontentloaded", timeout=60000)
+                    
+                    if "login" in page.url.lower():
+                        raise Exception("直接訪問網址被導回登入頁，代表 Session 驗證失效")
 
-    page.wait_for_selector("select[name='shift_no']", timeout=15000)
-    step_status["redirect"] = "成功"
-    log("步驟2 直接進入訂餐系統", "OK", log_lines=log_lines)
-except Exception as e:
-    step_status["redirect"] = f"失敗：無法直接進入訂餐頁，原始錯誤：{e}"
-    log("步驟2 直接進入訂餐系統", "FAIL", str(e), log_lines=log_lines)
-    page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
-    _write_log(attempt, log_lines)
-    raise
+                    page.wait_for_selector("select[name='shift_no']", timeout=15000)
+                    step_status["redirect"] = "成功"
+                    log("步驟2 直接進入訂餐系統", "OK", log_lines=log_lines)
+                except Exception as e:
+                    step_status["redirect"] = f"失敗：無法直接進入訂餐頁，原始錯誤：{e}"
+                    log("步驟2 直接進入訂餐系統", "FAIL", str(e), log_lines=log_lines)
+                    page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
+                    _write_log(attempt, log_lines)
+                    raise
 
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
                 # 6. 餐別選擇午餐 (shift_no = 2)
-                # 注意：實際頁面中 shift_no 的 <select> 有 OnChange="form11.submit()"，
-                # 選擇後會觸發整頁重新載入（非單純 AJAX 局部更新），因此改用等待導覽完成，
-                # 比固定 timeout 更可靠；若網路較慢，wait_for_timeout 可能還沒抓到新頁面內容。
                 with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
                     page.select_option("select[name='shift_no']", "2")
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
                 log("步驟2-1 選擇餐別（午餐）", "OK", log_lines=log_lines)
 
                 # 7. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
-                # 注意：實際頁面中這是 radio (OnClick="form12.submit()")，且「健康均衡餐(葷)」
-                # 目前為預設已勾選項目。Playwright 的 check() 若偵測到已勾選則不會觸發 click，
-                # 也就不會重新整理頁面；只有在需要「切換」選項時才會真的送出 form12 並整頁重載，
-                # 這裡先判斷是否已勾選，只有真的要改變時才等待導覽完成。
                 try:
                     classkind_266 = page.locator("input[name='classkind'][value='266']")
                     if classkind_266.is_checked():
@@ -255,14 +245,6 @@ except Exception as e:
                 page.wait_for_timeout(1000)
 
                 # ---------- 步驟 3：發出訂餐需求 ----------
-                # 依實際頁面結構確認：每個日期各自有一個 <select name="odrpcs民國年月日">
-                # (例如 odrpcs1150923，即民國115年9月23日)。「中(N)」顯示的是該日期午餐目前
-                # 「剩餘可訂份數」，N=0 時該 <select> 會被 disabled（代表已訂完，不是「尚未開放」）；
-                # 只要還有剩餘份數，該日期就是可下拉選擇的，因此同一週可能同時有多天都是開放的。
-                # 下拉選單的選項也是依剩餘份數動態產生（例如剩 1 份，選單就只會有 "--"、"1"，不會有 "2"）。
-                # 這裡的邏輯：在所有未 disabled（尚有剩餘份數）的日期中，優先挑「日期最新」且「剩餘份數
-                # 足夠 MEAL_COUNT」的一筆；若最新那天份數不夠，依日期新舊往前找，取第一筆份數足夠的；
-                # 若全部都不夠，才退而求其次選「最新一筆、但只能給的剩餘份數」，並明確印出警告。
                 order_date_selected = False
                 try:
                     page.fill("input[name='depttel']", "6551")
@@ -288,7 +270,6 @@ except Exception as e:
                         candidates.append((int(digits), sel, option_values))
 
                     if candidates:
-                        # 依日期數字由新到舊排序
                         candidates.sort(key=lambda x: x[0], reverse=True)
 
                         chosen = None
@@ -298,8 +279,6 @@ except Exception as e:
                                 break
 
                         if chosen is None:
-                            # 沒有任何一天的剩餘份數足夠 MEAL_COUNT，退而求其次：
-                            # 用「日期最新」那筆，選它剩餘份數清單中的最大值
                             latest_digits, latest_sel, latest_options = candidates[0]
                             if latest_options:
                                 fallback_count = str(max(int(v) for v in latest_options))
@@ -324,20 +303,10 @@ except Exception as e:
 
                 page.screenshot(path=f"screenshots/6_ready_to_submit.png")
 
-                # 9. 點擊送出按鈕 (B2)
-                # B2 送出按鈕實際上是在同一頁的 form3 (action="OrderPers_ins.asp") 裡面。
-                # 若需要正式送出，可將下方註解取消；測試期間可先保留註解以檢查截圖畫面。
-                # 加上 order_date_selected 判斷，避免在沒有任何可訂日期時誤送出空白訂單。
                 if not order_date_selected:
                     step_status["order_submit"] = "未送出：沒有找到可訂購的日期/份數，避免送出空白訂單"
                     log("步驟3 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines)
                 else:
-                    # 目前送出動作仍為安全考量而保留註解，只完成到「準備送出前」的畫面。
-                    # 如需啟用，將下方三行取消註解；啟用後建議同時補上送出成功的判斷條件
-                    # （例如確認畫面上出現的文字或欄位），我目前沒有那個確認頁的 HTML 可以參考。
-                    # page.click("input[name='B2']")
-                    # page.wait_for_timeout(3000)
-                    # page.screenshot(path=f"screenshots/7_submitted.png")
                     step_status["order_submit"] = "未送出：送出按鈕程式碼目前仍為註解狀態（安全考量），已完成到送出前的準備畫面"
                     log("步驟3 訂餐送出", "WARN", "送出按鈕仍為註解狀態，尚未真正送出訂單", log_lines=log_lines)
 
