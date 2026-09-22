@@ -194,7 +194,6 @@ def run_automation():
                 page.wait_for_timeout(4000)
 
                 if page.locator("#username").is_visible():
-                    # 仍看到帳號欄位，代表登入沒有成功（可能驗證碼錯誤或帳密錯誤）
                     step_status["login"] = "失敗：送出登入後仍停留在登入頁（可能驗證碼辨識錯誤或帳號密碼錯誤）"
                     log("步驟1 登入", "FAIL", "仍停留在登入頁，可能驗證碼或帳密錯誤", log_lines=log_lines)
                     page.screenshot(path=f"screenshots/login_failed_{attempt}.png")
@@ -205,46 +204,44 @@ def run_automation():
                 log("步驟1 登入", "OK", log_lines=log_lines)
                 page.screenshot(path=f"screenshots/3_logged_in.png")
 
-                # ---------- 步驟 2：直接前往訂餐系統主網址 ----------
-                tran_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
+                # ---------- 步驟 2：轉址至營養部訂餐系統 ----------
+                tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
                 try:
                     page.goto(tran_url, wait_until="domcontentloaded", timeout=60000)
-                    
-                    if "login" in page.url.lower():
-                        raise Exception("直接訪問網址被導回登入頁，代表 Session 驗證失效")
-
-                    page.wait_for_selector("select[name='shift_no']", timeout=15000)
+                    page.wait_for_selector("select[name='shift_no']", timeout=30000)
                     step_status["redirect"] = "成功"
-                    log("步驟2 直接進入訂餐系統", "OK", log_lines=log_lines)
+                    log("步驟2 轉址至訂餐系統", "OK", log_lines=log_lines)
                 except Exception as e:
-                    step_status["redirect"] = f"失敗：無法直接進入訂餐頁，原始錯誤：{e}"
-                    log("步驟2 直接進入訂餐系統", "FAIL", str(e), log_lines=log_lines)
+                    step_status["redirect"] = f"失敗：轉址後找不到訂餐頁的餐別選單（shift_no），原始錯誤：{e}"
+                    log("步驟2 轉址至訂餐系統", "FAIL", f"找不到 shift_no 選單，可能未成功轉址：{e}", log_lines=log_lines)
                     page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
                     _write_log(attempt, log_lines)
                     raise
 
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
-                # 6. 餐別選擇午餐 (shift_no = 2)
+                # ---------- 步驟 3：正確的互動順序（餐別 -> 餐盒類別 -> 填資料與選日期 $\rightarrow$ 送出）----------
+                
+                # 3-1. 選擇餐別「午餐」 (shift_no = 2)[cite: 3]
                 with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
                     page.select_option("select[name='shift_no']", "2")
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
-                log("步驟2-1 選擇餐別（午餐）", "OK", log_lines=log_lines)
+                log("步驟3-1 選擇餐別（午餐）", "OK", log_lines=log_lines)
 
-                # 7. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
+                # 3-2. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")[cite: 4]
                 try:
                     classkind_266 = page.locator("input[name='classkind'][value='266']")
                     if classkind_266.is_checked():
-                        log("步驟2-2 選擇餐盒類別", "OK", "「健康均衡餐(葷)」已是預設選項，無需切換", log_lines=log_lines)
+                        log("步驟3-2 選擇餐盒類別", "OK", "「健康均衡餐(葷)」已是預設選項，無需切換", log_lines=log_lines)
                     else:
                         with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
                             classkind_266.check()
-                        log("步驟2-2 選擇餐盒類別", "OK", "已切換為「健康均衡餐(葷)」", log_lines=log_lines)
+                        log("步驟3-2 選擇餐盒類別", "OK", "已切換為「健康均衡餐(葷)」", log_lines=log_lines)
                 except Exception as e:
-                    log("步驟2-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines)
+                    log("步驟3-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines)
                 page.wait_for_timeout(1000)
 
-                # ---------- 步驟 3：發出訂餐需求 ----------
+                # 3-3. 填寫科室分機與尋找可訂日期份數[cite: 4]
                 order_date_selected = False
                 try:
                     page.fill("input[name='depttel']", "6551")
@@ -284,7 +281,7 @@ def run_automation():
                                 fallback_count = str(max(int(v) for v in latest_options))
                                 chosen = (latest_sel, fallback_count, latest_digits)
                                 log(
-                                    "步驟3-1 選擇日期與份數", "WARN",
+                                    "步驟3-3 選擇日期與份數", "WARN",
                                     f"最新可訂日期剩餘份數不足 {MEAL_COUNT} 份，改訂購剩餘可提供的 {fallback_count} 份",
                                     log_lines=log_lines,
                                 )
@@ -293,28 +290,33 @@ def run_automation():
                             target_sel, target_count, target_digits = chosen
                             target_sel.select_option(target_count)
                             order_date_selected = True
-                            log("步驟3-1 選擇日期與份數", "OK", f"日期(數字){target_digits} -> {target_count} 份", log_lines=log_lines)
+                            log("步驟3-3 選擇日期與份數", "OK", f"日期(數字){target_digits} -> {target_count} 份", log_lines=log_lines)
                         else:
-                            log("步驟3-1 選擇日期與份數", "FAIL", "找到開放中的日期，但剩餘份數選單為空", log_lines=log_lines)
+                            log("步驟3-3 選擇日期與份數", "FAIL", "找到開放中的日期，但剩餘份數選單為空", log_lines=log_lines)
                     else:
-                        log("步驟3-1 選擇日期與份數", "FAIL", "目前所有日期的午餐皆已訂完（剩餘份數為 0）", log_lines=log_lines)
+                        log("步驟3-3 選擇日期與份數", "FAIL", "目前所有日期的午餐皆已訂完（剩餘份數為 0）", log_lines=log_lines)
                 except Exception as e:
-                    log("步驟3-1 選擇日期與份數", "FAIL", str(e), log_lines=log_lines)
+                    log("步驟3-3 選擇日期與份數", "FAIL", str(e), log_lines=log_lines)
 
                 page.screenshot(path=f"screenshots/6_ready_to_submit.png")
 
+                # 3-4. 點擊送出按鈕 (B2)
                 if not order_date_selected:
                     step_status["order_submit"] = "未送出：沒有找到可訂購的日期/份數，避免送出空白訂單"
-                    log("步驟3 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines)
+                    log("步驟3-4 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines)
                 else:
-                    step_status["order_submit"] = "未送出：送出按鈕程式碼目前仍為註解狀態（安全考量），已完成到送出前的準備畫面"
-                    log("步驟3 訂餐送出", "WARN", "送出按鈕仍為註解狀態，尚未真正送出訂單", log_lines=log_lines)
+                    # 正式執行點擊送出按鈕 B2
+                    page.click("input[name='B2']")
+                    page.wait_for_timeout(3000)
+                    page.screenshot(path=f"screenshots/7_submitted.png")
+                    step_status["order_submit"] = "成功：已點擊送出訂單按鈕 (B2)"
+                    log("步驟3-4 訂餐送出", "OK", "已成功點擊送出按鈕", log_lines=log_lines)
 
                 # ---------- 本次嘗試總結 ----------
                 log("=== 本次嘗試步驟總結 ===", "INFO", log_lines=log_lines)
                 log("步驟1 登入", "OK" if step_status["login"] == "成功" else "FAIL", step_status["login"], log_lines=log_lines)
                 log("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines)
-                log("步驟3 訂餐送出", "WARN", step_status["order_submit"], log_lines=log_lines)
+                log("步驟3 訂餐送出", "OK" if "成功" in step_status["order_submit"] else "WARN", step_status["order_submit"], log_lines=log_lines)
                 _write_log(attempt, log_lines)
 
                 print("【高醫員工餐自動訂餐流程執行完成】")
@@ -333,7 +335,7 @@ def run_automation():
                     print(f"【高醫員工餐自動訂餐失敗】已達最大重試次數，錯誤原因: {e}")
                     browser.close()
                     raise e
-                time.sleep(3)
+                time.sleep(5)
 
         browser.close()
 
