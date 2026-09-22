@@ -55,7 +55,7 @@ jobs:
             "messages": [
               {
                 "type": "text",
-                "text": "✨ 【高醫自動訂餐】執行成功！\n專案：${{ github.repository }}\n狀態：已完成自動訂餐流程\n詳細畫面請至 GitHub Actions 檢視"
+                "text": "✨ 【高醫自動訂餐】執行成功！"
               }
             ]
           }'
