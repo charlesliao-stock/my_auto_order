@@ -11,8 +11,9 @@ import pytesseract
 USERNAME = os.environ.get("KMUH_USERNAME")
 PASSWORD = os.environ.get("KMUH_PASSWORD")
 MEAL_COUNT = os.environ.get("MEAL_COUNT", "2")  # 預設份數為 2
+DEPT_TEL = os.environ.get("KMUH_DEPT_TEL", "6551")  # 固定分機號碼
 
-_VALID_CAPTCHA_RE = re.compile(r"^[A-Za-z0-9]{4}$")
+_VALID_CAPTCHA_RE = re.compile(r"^[A-Z0-9]{4}$")
 
 _STATUS_ICON = {"OK": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️"}
 
@@ -84,12 +85,12 @@ def _preprocess_variants(image_path):
     bin_otsu_inv = bin_otsu_inv.filter(ImageFilter.MedianFilter(size=3))
     variants.append(bin_otsu_inv)
 
-    # 變體 3：原本固定門檻 150 的版本，保留作為備援（對某些圖片可能反而比 Otsu 準）
+    # 變體 3：原本固定門檻 150 的版本，保留作為備援
     bin_fixed = gray.point(lambda x: 0 if x < 150 else 255, '1')
     bin_fixed = bin_fixed.filter(ImageFilter.MedianFilter(size=3))
     variants.append(bin_fixed)
 
-    # 變體 4：Otsu 二值化 + 形態學開運算 (先侵蝕再膨脹)，去除細小雜點/干擾線
+    # 變體 4：Otsu 二值化 + 形態學開運算，去除細小雜點/干擾線
     bin_denoised = bin_otsu.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
     variants.append(bin_denoised)
 
@@ -101,10 +102,9 @@ def solve_captcha(image_path):
     try:
         variants = _preprocess_variants(image_path)
 
-        # 限制字元集為大小寫英文與數字 4 碼；同時嘗試多個 psm 模式，
-        # 因為不同 psm（單行文字/單詞/稀疏文字）對不同驗證碼字型的效果不一
+        # 限制字元集為大寫英文與數字 4 碼
         psm_modes = [8, 7, 13]
-        char_whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        char_whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
         votes = Counter()
         for variant_img in variants:
@@ -114,7 +114,7 @@ def solve_captcha(image_path):
                     raw = pytesseract.image_to_string(variant_img, config=config)
                 except Exception:
                     continue
-                candidate = raw.strip().replace(" ", "").replace("\n", "")
+                candidate = raw.strip().upper().replace(" ", "").replace("\n", "")
                 if _VALID_CAPTCHA_RE.match(candidate):
                     votes[candidate] += 1
 
@@ -123,16 +123,16 @@ def solve_captcha(image_path):
             print(f"驗證碼候選結果: {dict(votes)} -> 採用: {best}")
             return best
 
-        # 所有嘗試都沒有產生「剛好 4 碼英數字」的結果，
-        # 退而求其次回傳第一種前處理、psm=8 的原始辨識結果（可能長度不對，交由外層重試判斷）
+        # 備援辨識
         fallback_config = f'-c tessedit_char_whitelist={char_whitelist} --psm 8'
         fallback_text = pytesseract.image_to_string(variants[0], config=fallback_config).strip()
-        fallback = fallback_text.replace(" ", "")[:4]
+        fallback = fallback_text.upper().replace(" ", "")[:4]
         print(f"驗證碼多數決無結果，使用備援辨識: {fallback}")
         return fallback
     except Exception as e:
         print(f"驗證碼辨識錯誤: {e}")
         return ""
+
 
 def run_automation():
     os.makedirs("screenshots", exist_ok=True)
@@ -146,7 +146,6 @@ def run_automation():
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             log_lines = []
-            # 三大步驟各自的狀態，最後會統一印出總結，讓你一眼看出卡在哪一步
             step_status = {
                 "login": "未開始",
                 "redirect": "未開始",
@@ -157,7 +156,6 @@ def run_automation():
                 log(f"=== 第 {attempt}/{max_retries} 次嘗試開始 ===", "INFO", log_lines=log_lines)
 
                 # ---------- 步驟 1：登入 ----------
-                # 1-1. 前往高醫單一入口網
                 try:
                     page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=30000)
                     page.wait_for_selector("#username", timeout=30000)
@@ -189,9 +187,12 @@ def run_automation():
                 page.screenshot(path=f"screenshots/2_filled_form_{attempt}.png")
                 log("步驟1-3 填寫帳密與驗證碼", "OK", log_lines=log_lines)
 
-                # 1-4. 點擊登入按鈕，並明確判斷成功/失敗
+                # 1-4. 點擊登入按鈕
                 page.click("#login")
-                page.wait_for_timeout(4000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
 
                 if page.locator("#username").is_visible():
                     step_status["login"] = "失敗：送出登入後仍停留在登入頁（可能驗證碼辨識錯誤或帳號密碼錯誤）"
@@ -220,15 +221,15 @@ def run_automation():
 
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
-                # ---------- 步驟 3：正確的互動順序（餐別 -> 餐盒類別 -> 填資料與選日期 $\rightarrow$ 送出）----------
+                # ---------- 步驟 3：互動順序（餐別 -> 餐盒類別 -> 填資料與選日期 -> 送出） ----------
                 
-                # 3-1. 選擇餐別「午餐」 (shift_no = 2)[cite: 3]
+                # 3-1. 選擇餐別「午餐」 (shift_no = 2)
                 with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
                     page.select_option("select[name='shift_no']", "2")
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
                 log("步驟3-1 選擇餐別（午餐）", "OK", log_lines=log_lines)
 
-                # 3-2. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")[cite: 4]
+                # 3-2. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
                 try:
                     classkind_266 = page.locator("input[name='classkind'][value='266']")
                     if classkind_266.is_checked():
@@ -239,21 +240,21 @@ def run_automation():
                         log("步驟3-2 選擇餐盒類別", "OK", "已切換為「健康均衡餐(葷)」", log_lines=log_lines)
                 except Exception as e:
                     log("步驟3-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines)
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(500)
 
-                # 3-3. 填寫科室分機與尋找可訂日期份數[cite: 4]
+                # 3-3. 填寫科室分機與尋找可訂日期份數
                 order_date_selected = False
                 try:
-                    page.fill("input[name='depttel']", "6551")
+                    page.fill("input[name='depttel']", DEPT_TEL)
 
                     qty_selects = page.locator("select[name^='odrpcs']")
                     count = qty_selects.count()
 
-                    candidates = []  # (日期數字, select locator, 該日期可選的份數清單)
+                    candidates = []  
                     for i in range(count):
                         sel = qty_selects.nth(i)
                         if sel.get_attribute("disabled") is not None:
-                            continue  # 已無剩餘份數（訂完），跳過
+                            continue  
                         name = sel.get_attribute("name") or ""
                         digits = "".join(ch for ch in name if ch.isdigit())
                         if not digits:
@@ -305,7 +306,6 @@ def run_automation():
                     step_status["order_submit"] = "未送出：沒有找到可訂購的日期/份數，避免送出空白訂單"
                     log("步驟3-4 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines)
                 else:
-                    # 正式執行點擊送出按鈕 B2
                     page.click("input[name='B2']")
                     page.wait_for_timeout(3000)
                     page.screenshot(path=f"screenshots/7_submitted.png")
@@ -341,13 +341,13 @@ def run_automation():
 
 
 def _write_log(attempt, log_lines):
-    """把這次嘗試收集到的 log 寫成文字檔，跟截圖存在同一個資料夾，
-    方便在 GitHub Actions 的 artifact 裡直接下載查看，不用只靠 console 輸出。"""
+    """把這次嘗試收集到的 log 寫成文字檔，跟截圖存在同一個資料夾"""
     try:
         with open(f"screenshots/log_attempt_{attempt}.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(log_lines))
     except Exception as e:
         print(f"寫入 log 檔案失敗: {e}")
+
 
 if __name__ == "__main__":
     run_automation()
