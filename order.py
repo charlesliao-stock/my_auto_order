@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import datetime
 from collections import Counter
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageEnhance, ImageFilter
@@ -12,6 +13,20 @@ PASSWORD = os.environ.get("KMUH_PASSWORD")
 MEAL_COUNT = os.environ.get("MEAL_COUNT", "2")  # 預設份數為 2
 
 _VALID_CAPTCHA_RE = re.compile(r"^[A-Za-z0-9]{4}$")
+
+_STATUS_ICON = {"OK": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️"}
+
+
+def log(step_label, status, detail="", log_lines=None):
+    """統一格式的細項 log：印到 console，並（若有提供 log_lines 清單）一併收集，
+    方便最後寫成一份可下載的 log 檔案，而不是只能從 GitHub Actions console 裡爬文找原因。"""
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    icon = _STATUS_ICON.get(status, "")
+    line = f"[{ts}] {icon} {step_label}" + (f"：{detail}" if detail else "")
+    print(line)
+    if log_lines is not None:
+        log_lines.append(line)
+    return line
 
 
 def _otsu_threshold(gray_img):
@@ -121,7 +136,7 @@ def solve_captcha(image_path):
 
 def run_automation():
     os.makedirs("screenshots", exist_ok=True)
-    
+
     with sync_playwright() as p:
         # 啟動背景瀏覽器
         browser = p.chromium.launch(headless=True)
@@ -130,50 +145,83 @@ def run_automation():
 
         max_retries = 3
         for attempt in range(1, max_retries + 1):
+            log_lines = []
+            # 三大步驟各自的狀態，最後會統一印出總結，讓你一眼看出卡在哪一步
+            step_status = {
+                "login": "未開始",
+                "redirect": "未開始",
+                "order_submit": "未開始",
+            }
+
             try:
-                print(f"--- 開始第 {attempt} 次嘗試訂餐 ---")
-                
-                # 1. 前往高醫單一入口網
-                page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_selector("#username", timeout=30000)
-                page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
-                
-                # 2. 擷取驗證碼圖片並進行 OCR 辨識
+                log(f"=== 第 {attempt}/{max_retries} 次嘗試開始 ===", "INFO", log_lines=log_lines)
+
+                # ---------- 步驟 1：登入 ----------
+                # 1-1. 前往高醫單一入口網
+                try:
+                    page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_selector("#username", timeout=30000)
+                    page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
+                    log("步驟1-1 開啟登入頁", "OK", log_lines=log_lines)
+                except Exception as e:
+                    step_status["login"] = f"失敗：無法開啟登入頁或找不到帳號欄位（{e}）"
+                    log("步驟1-1 開啟登入頁", "FAIL", str(e), log_lines=log_lines)
+                    raise
+
+                # 1-2. 擷取驗證碼圖片並進行 OCR 辨識
                 captcha_img = page.locator("#kmuh-captcha-img")
                 captcha_img.screenshot(path=f"screenshots/captcha_{attempt}.png")
-                
                 captcha_code = solve_captcha(f"screenshots/captcha_{attempt}.png")
-                print(f"辨識出的驗證碼: {captcha_code}")
-                
+                log("步驟1-2 驗證碼辨識結果", "INFO", f"'{captcha_code}'", log_lines=log_lines)
+
                 if len(captcha_code) != 4:
-                    print("驗證碼長度不正確，重新整理重試...")
+                    step_status["login"] = f"失敗：驗證碼辨識結果長度不正確（辨識出 '{captcha_code}'），重新整理重試"
+                    log("步驟1-2 驗證碼長度檢查", "FAIL", "非 4 碼，重新整理驗證碼後重試", log_lines=log_lines)
+                    _write_log(attempt, log_lines)
                     captcha_img.click()
                     page.wait_for_timeout(1000)
                     continue
 
-                # 3. 填入帳號、密碼與驗證碼
+                # 1-3. 填入帳號、密碼與驗證碼
                 page.fill("#username", USERNAME)
                 page.fill("#password", PASSWORD)
                 page.fill("#kmuh-captcha", captcha_code)
-                
                 page.screenshot(path=f"screenshots/2_filled_form_{attempt}.png")
+                log("步驟1-3 填寫帳密與驗證碼", "OK", log_lines=log_lines)
 
-                # 4. 點擊登入按鈕
+                # 1-4. 點擊登入按鈕，並明確判斷成功/失敗
                 page.click("#login")
                 page.wait_for_timeout(4000)
 
-                # 檢查是否登入失敗
                 if page.locator("#username").is_visible():
-                    print("登入失敗（可能驗證碼錯誤或帳密有誤），重試中...")
+                    # 仍看到帳號欄位，代表登入沒有成功（可能驗證碼錯誤或帳密錯誤）
+                    step_status["login"] = "失敗：送出登入後仍停留在登入頁（可能驗證碼辨識錯誤或帳號密碼錯誤）"
+                    log("步驟1 登入", "FAIL", "仍停留在登入頁，可能驗證碼或帳密錯誤", log_lines=log_lines)
                     page.screenshot(path=f"screenshots/login_failed_{attempt}.png")
+                    _write_log(attempt, log_lines)
                     continue
 
-                print("登入成功！")
+                step_status["login"] = "成功"
+                log("步驟1 登入", "OK", log_lines=log_lines)
                 page.screenshot(path=f"screenshots/3_logged_in.png")
 
-                # 5. 透過轉向網址進入營養部訂餐系統
+                # ---------- 步驟 2：轉址至營養部訂餐系統 ----------
                 tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
-                page.goto(tran_url, wait_until="domcontentloaded", timeout=30000)
+                try:
+                    page.goto(tran_url, wait_until="domcontentloaded", timeout=30000)
+                    # 轉址後主動確認訂餐頁的關鍵欄位真的有出現，而不是只假設 goto 成功就代表頁面正確，
+                    # 因為 goto 只代表「有載入某個頁面」，不保證是我們要的訂餐頁（有可能被導回登入頁、
+                    # 或顯示系統錯誤頁）
+                    page.wait_for_selector("select[name='shift_no']", timeout=15000)
+                    step_status["redirect"] = "成功"
+                    log("步驟2 轉址至訂餐系統", "OK", log_lines=log_lines)
+                except Exception as e:
+                    step_status["redirect"] = f"失敗：轉址後找不到訂餐頁的餐別選單（shift_no），原始錯誤：{e}"
+                    log("步驟2 轉址至訂餐系統", "FAIL", f"找不到 shift_no 選單，可能未成功轉址：{e}", log_lines=log_lines)
+                    page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
+                    _write_log(attempt, log_lines)
+                    raise
+
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
                 # 6. 餐別選擇午餐 (shift_no = 2)
@@ -183,6 +231,7 @@ def run_automation():
                 with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
                     page.select_option("select[name='shift_no']", "2")
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
+                log("步驟2-1 選擇餐別（午餐）", "OK", log_lines=log_lines)
 
                 # 7. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
                 # 注意：實際頁面中這是 radio (OnClick="form12.submit()")，且「健康均衡餐(葷)」
@@ -192,15 +241,16 @@ def run_automation():
                 try:
                     classkind_266 = page.locator("input[name='classkind'][value='266']")
                     if classkind_266.is_checked():
-                        print("餐盒類別「健康均衡餐(葷)」已是預設選項，無需切換")
+                        log("步驟2-2 選擇餐盒類別", "OK", "「健康均衡餐(葷)」已是預設選項，無需切換", log_lines=log_lines)
                     else:
                         with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
                             classkind_266.check()
+                        log("步驟2-2 選擇餐盒類別", "OK", "已切換為「健康均衡餐(葷)」", log_lines=log_lines)
                 except Exception as e:
-                    print(f"選擇餐盒類別發生錯誤: {e}")
+                    log("步驟2-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines)
                 page.wait_for_timeout(1000)
 
-                # 8. 填寫分機資料 (depttel = 6551) 與份數
+                # ---------- 步驟 3：發出訂餐需求 ----------
                 # 依實際頁面結構確認：每個日期各自有一個 <select name="odrpcs民國年月日">
                 # (例如 odrpcs1150923，即民國115年9月23日)。「中(N)」顯示的是該日期午餐目前
                 # 「剩餘可訂份數」，N=0 時該 <select> 會被 disabled（代表已訂完，不是「尚未開放」）；
@@ -209,6 +259,7 @@ def run_automation():
                 # 這裡的邏輯：在所有未 disabled（尚有剩餘份數）的日期中，優先挑「日期最新」且「剩餘份數
                 # 足夠 MEAL_COUNT」的一筆；若最新那天份數不夠，依日期新舊往前找，取第一筆份數足夠的；
                 # 若全部都不夠，才退而求其次選「最新一筆、但只能給的剩餘份數」，並明確印出警告。
+                order_date_selected = False
                 try:
                     page.fill("input[name='depttel']", "6551")
 
@@ -232,7 +283,6 @@ def run_automation():
                         ]
                         candidates.append((int(digits), sel, option_values))
 
-                    order_date_selected = False
                     if candidates:
                         # 依日期數字由新到舊排序
                         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -250,24 +300,23 @@ def run_automation():
                             if latest_options:
                                 fallback_count = str(max(int(v) for v in latest_options))
                                 chosen = (latest_sel, fallback_count, latest_digits)
-                                print(
-                                    f"警告：最新可訂日期剩餘份數不足 {MEAL_COUNT} 份，"
-                                    f"改為訂購剩餘可提供的 {fallback_count} 份，請務必確認截圖與實際需求是否相符"
+                                log(
+                                    "步驟3-1 選擇日期與份數", "WARN",
+                                    f"最新可訂日期剩餘份數不足 {MEAL_COUNT} 份，改訂購剩餘可提供的 {fallback_count} 份",
+                                    log_lines=log_lines,
                                 )
 
                         if chosen:
                             target_sel, target_count, target_digits = chosen
                             target_sel.select_option(target_count)
                             order_date_selected = True
-                            print(f"已選擇日期(數字){target_digits}的訂餐數量選單 -> {target_count} 份")
+                            log("步驟3-1 選擇日期與份數", "OK", f"日期(數字){target_digits} -> {target_count} 份", log_lines=log_lines)
                         else:
-                            print("警告：找到開放中的日期，但其剩餘份數選單為空，無法下單")
+                            log("步驟3-1 選擇日期與份數", "FAIL", "找到開放中的日期，但剩餘份數選單為空", log_lines=log_lines)
                     else:
-                        # 目前沒有任何一筆日期還有剩餘份數（全部已訂完/disabled）
-                        print("警告：目前所有日期的午餐皆已訂完（剩餘份數為 0），本次無法訂餐")
+                        log("步驟3-1 選擇日期與份數", "FAIL", "目前所有日期的午餐皆已訂完（剩餘份數為 0）", log_lines=log_lines)
                 except Exception as e:
-                    order_date_selected = False
-                    print(f"填寫分機或份數時發生錯誤: {e}")
+                    log("步驟3-1 選擇日期與份數", "FAIL", str(e), log_lines=log_lines)
 
                 page.screenshot(path=f"screenshots/6_ready_to_submit.png")
 
@@ -275,19 +324,37 @@ def run_automation():
                 # B2 送出按鈕實際上是在同一頁的 form3 (action="OrderPers_ins.asp") 裡面。
                 # 若需要正式送出，可將下方註解取消；測試期間可先保留註解以檢查截圖畫面。
                 # 加上 order_date_selected 判斷，避免在沒有任何可訂日期時誤送出空白訂單。
-                # if order_date_selected:
-                #     page.click("input[name='B2']")
-                #     page.wait_for_timeout(3000)
-                #     page.screenshot(path=f"screenshots/7_submitted.png")
-                # else:
-                #     print("因無可訂購日期，本次不送出訂單")
+                if not order_date_selected:
+                    step_status["order_submit"] = "未送出：沒有找到可訂購的日期/份數，避免送出空白訂單"
+                    log("步驟3 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines)
+                else:
+                    # 目前送出動作仍為安全考量而保留註解，只完成到「準備送出前」的畫面。
+                    # 如需啟用，將下方三行取消註解；啟用後建議同時補上送出成功的判斷條件
+                    # （例如確認畫面上出現的文字或欄位），我目前沒有那個確認頁的 HTML 可以參考。
+                    # page.click("input[name='B2']")
+                    # page.wait_for_timeout(3000)
+                    # page.screenshot(path=f"screenshots/7_submitted.png")
+                    step_status["order_submit"] = "未送出：送出按鈕程式碼目前仍為註解狀態（安全考量），已完成到送出前的準備畫面"
+                    log("步驟3 訂餐送出", "WARN", "送出按鈕仍為註解狀態，尚未真正送出訂單", log_lines=log_lines)
+
+                # ---------- 本次嘗試總結 ----------
+                log("=== 本次嘗試步驟總結 ===", "INFO", log_lines=log_lines)
+                log("步驟1 登入", "OK" if step_status["login"] == "成功" else "FAIL", step_status["login"], log_lines=log_lines)
+                log("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines)
+                log("步驟3 訂餐送出", "WARN", step_status["order_submit"], log_lines=log_lines)
+                _write_log(attempt, log_lines)
 
                 print("【高醫員工餐自動訂餐流程執行完成】")
                 browser.close()
                 return True
 
             except Exception as e:
-                print(f"第 {attempt} 次執行發生錯誤: {e}")
+                log(f"第 {attempt} 次執行發生錯誤", "FAIL", str(e), log_lines=log_lines)
+                log("=== 本次嘗試步驟總結（因錯誤中斷）===", "INFO", log_lines=log_lines)
+                log("步驟1 登入", "OK" if step_status["login"] == "成功" else "FAIL", step_status["login"], log_lines=log_lines)
+                log("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines)
+                log("步驟3 訂餐送出", "FAIL" if step_status["order_submit"] == "未開始" else "WARN", step_status["order_submit"], log_lines=log_lines)
+                _write_log(attempt, log_lines)
                 page.screenshot(path=f"screenshots/error_attempt_{attempt}.png")
                 if attempt == max_retries:
                     print(f"【高醫員工餐自動訂餐失敗】已達最大重試次數，錯誤原因: {e}")
@@ -296,6 +363,16 @@ def run_automation():
                 time.sleep(3)
 
         browser.close()
+
+
+def _write_log(attempt, log_lines):
+    """把這次嘗試收集到的 log 寫成文字檔，跟截圖存在同一個資料夾，
+    方便在 GitHub Actions 的 artifact 裡直接下載查看，不用只靠 console 輸出。"""
+    try:
+        with open(f"screenshots/log_attempt_{attempt}.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(log_lines))
+    except Exception as e:
+        print(f"寫入 log 檔案失敗: {e}")
 
 if __name__ == "__main__":
     run_automation()
