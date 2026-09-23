@@ -165,6 +165,128 @@ def solve_captcha(image_path):
         return ""
 
 
+# ---------- 每日首次登入的「體溫填報」彈窗處理 ----------
+# 每天 00:00 後第一次登入，入口網站會跳出 #system-hint-modal（Bootstrap modal，
+# data-bs-backdrop="static"、data-bs-keyboard="false"），會蓋住整個頁面，
+# 導致後面點「高醫醫療體系訂餐系統」連結時一直被攔截、逾時。
+#
+# 依入口網頁原始碼，彈窗結構如下：
+#   - 「無，我的體溫(°C)是:」單選鈕帶 data-show-temp，點了會展開體溫表(#temp-table)
+#   - 體溫表內每個溫度是 [data-upload-temp="36"] 之類的元素，點下去就 AJAX 送出
+#   - 「體溫超過37.5°C…」單選鈕帶 data-show-url，會【開新分頁】跳到體溫網站，絕對不能點
+#   - 「進行填寫」(#overtime-fill) 也是開新分頁，不能點
+#   - 若同時有延長工時提醒(#overtime-hint)，送出體溫後彈窗不會自動關，要按右上角 ×
+#     (.portal-modal-close)
+TEMPERATURE_VALUE = os.environ.get("KMUH_TEMPERATURE", "36")
+
+_FORCE_CLOSE_MODAL_JS = """
+() => {
+  document.querySelectorAll('#system-hint-modal, .modal.show').forEach(m => m.remove());
+  document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+  document.body.classList.remove('modal-open');
+  document.body.style.removeProperty('overflow');
+  document.body.style.removeProperty('padding-right');
+}
+"""
+
+
+def _pick_temperature_value(options, wanted):
+    """從頁面上實際存在的 data-upload-temp 值裡，挑出等於 wanted 的；
+    沒有完全相同的就挑數值最接近、且不超過 37.4 的（避免誤報發燒）。"""
+    parsed = []
+    for o in options:
+        try:
+            parsed.append((float(o), o))
+        except ValueError:
+            continue
+    if not parsed:
+        return None
+    w = float(wanted)
+    for v, raw in parsed:
+        if v == w:
+            return raw
+    safe = [(abs(v - w), raw) for v, raw in parsed if v <= 37.4]
+    return min(safe)[1] if safe else None
+
+
+def _submit_temperature(page, modal, log_lines):
+    """展開體溫表 -> 點選 36 度。成功回傳實際點的值，失敗丟例外。"""
+    # 1) 點「無，我的體溫(°C)是:」（不是 data-show-url 那個會開新分頁的選項）
+    show_temp = modal.locator("[data-show-temp]").first
+    if show_temp.count() > 0:
+        show_temp.click(force=True, timeout=5000)
+    else:
+        modal.locator("label", has_text=re.compile(r"^\s*無，我的體溫")).first.click(timeout=5000)
+
+    # 2) 等體溫表出現，挑出 36
+    modal.locator("[data-upload-temp]").first.wait_for(state="visible", timeout=8000)
+    options = modal.locator("[data-upload-temp]").evaluate_all(
+        "els => els.map(e => e.getAttribute('data-upload-temp'))"
+    )
+    chosen = _pick_temperature_value(options, TEMPERATURE_VALUE)
+    if chosen is None:
+        raise RuntimeError(f"體溫表中找不到可用的選項（現有選項：{options}）")
+
+    # 3) 點下去送出；成功時網站會把 #tempature-panel 隱藏
+    modal.locator(f"[data-upload-temp='{chosen}']").first.click(timeout=5000)
+    page.locator("#tempature-panel").wait_for(state="hidden", timeout=15000)
+    # 送出時網站會蓋一層 blockUI 遮罩，等它消失再繼續
+    try:
+        page.locator(".blockUI").first.wait_for(state="detached", timeout=8000)
+    except Exception:
+        pass
+    return chosen
+
+
+def dismiss_system_hint_modal(page, log_lines=None, wait_ms=8000):
+    """處理每日首次登入的體溫彈窗。
+    方案 2（優先）：點「無，我的體溫」-> 點 36 度送出 -> 按 × 關閉彈窗。
+    方案 1（備援）：任何一步失敗，就用 JS 直接把彈窗與遮罩從 DOM 移除。
+    沒出現彈窗（例如當天已填過）就直接略過，回傳 False；有處理回傳 True。"""
+    modal = page.locator("#system-hint-modal")
+    try:
+        modal.wait_for(state="visible", timeout=wait_ms)
+    except Exception:
+        log_detailed("步驟1-5 檢查體溫彈窗", "INFO", "未出現彈窗，略過", log_lines=log_lines, page=page)
+        return False
+
+    safe_screenshot(page, "screenshots/popup_before.png", log_lines)
+    log_detailed("步驟1-5 檢查體溫彈窗", "INFO", "偵測到彈窗，嘗試送出體溫", log_lines=log_lines, page=page)
+
+    # 方案 2：送出體溫（若彈窗裡本來就沒有體溫區塊，例如只剩延長工時提醒，就直接關閉）
+    try:
+        if modal.locator("[data-show-temp], [data-upload-temp]").count() > 0:
+            chosen = _submit_temperature(page, modal, log_lines)
+            log_detailed("步驟1-5 體溫彈窗", "OK", f"已送出體溫 {chosen}", log_lines=log_lines, page=page)
+        else:
+            log_detailed("步驟1-5 體溫彈窗", "INFO", "彈窗內沒有體溫區塊，直接關閉", log_lines=log_lines, page=page)
+
+        # 送出後若還有其他提醒，彈窗不會自己關，手動按右上角 ×
+        try:
+            modal.wait_for(state="hidden", timeout=3000)
+        except Exception:
+            modal.locator(".portal-modal-close").first.click(timeout=5000)
+            modal.wait_for(state="hidden", timeout=8000)
+        page.wait_for_timeout(500)
+        log_detailed("步驟1-5 體溫彈窗", "OK", "彈窗已關閉", log_lines=log_lines, page=page)
+        safe_screenshot(page, "screenshots/popup_after.png", log_lines)
+        return True
+    except Exception as e:
+        log_detailed("步驟1-5 體溫彈窗", "WARN", f"正常流程失敗，改用強制關閉：{e}", log_lines=log_lines, page=page)
+
+    # 方案 1：強制關閉
+    try:
+        page.evaluate(_FORCE_CLOSE_MODAL_JS)
+        page.wait_for_timeout(500)
+        if page.locator("#system-hint-modal").count() == 0:
+            log_detailed("步驟1-5 體溫彈窗", "OK", "已強制移除彈窗", log_lines=log_lines, page=page)
+            safe_screenshot(page, "screenshots/popup_after.png", log_lines)
+            return True
+    except Exception as e:
+        log_detailed("步驟1-5 體溫彈窗", "FAIL", f"強制關閉也失敗：{e}", log_lines=log_lines, page=page)
+    return False
+
+
 def run_automation():
     os.makedirs("screenshots", exist_ok=True)
 
@@ -253,6 +375,9 @@ def run_automation():
                 log_detailed("步驟1 登入", "OK", "登入成功", log_lines=log_lines, page=page)
                 safe_screenshot(page, f"screenshots/3_logged_in.png", log_lines)
 
+                # 每日首次登入會跳出體溫彈窗，必須先處理掉，否則後面的連結會被攔截
+                dismiss_system_hint_modal(page, log_lines)
+
                 # ---------- 步驟 2：點擊「高醫醫療體系訂餐系統」連結，接住新分頁 ----------
                 # 確認過實際頁面上的連結是 target="_blank" 的 <a>，會另開新分頁：
                 # <a href="/Web/WebPortal/Home/TranUrl?sysid=583&url=...&inDBName=ora92"
@@ -271,6 +396,8 @@ def run_automation():
                     # 因為比對到多個元素而報錯（strict mode violation）
                     portal_link = portal_link.first
                     portal_link.wait_for(state="visible", timeout=15000)
+                    # 保險：彈窗若延遲出現（或上一步沒處理到），點連結前再確認一次
+                    dismiss_system_hint_modal(login_tab, log_lines, wait_ms=1500)
                     with login_tab.context.expect_page(timeout=30000) as new_page_info:
                         portal_link.click()
                     order_tab = new_page_info.value
