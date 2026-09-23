@@ -31,6 +31,7 @@ jobs:
           playwright install-deps chromium
 
       - name: Run Auto Order Script
+        id: run_order
         env:
           KMUH_USERNAME: ${{ secrets.KMUH_USERNAME }}
           KMUH_PASSWORD: ${{ secrets.KMUH_PASSWORD }}
@@ -56,7 +57,7 @@ jobs:
             "messages": [
               {
                 "type": "text",
-                "text": "✨ 【高醫自動訂餐】執行成功！"
+                "text": "✨ 【高醫自動訂餐】執行成功！\n${{ steps.run_order.outputs.order_summary }}"
               }
             ]
           }'
