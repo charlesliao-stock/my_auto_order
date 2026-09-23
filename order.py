@@ -19,15 +19,34 @@ _STATUS_ICON = {"OK": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️"}
 
 
 def log_detailed(step_label, status, detail="", log_lines=None, page=None):
-    """更詳細的 log 紀錄，包含當前網址與精確毫秒時間戳記，方便追蹤異常當下的狀態"""
+    """更詳細的 log 紀錄，包含當前網址與精確毫秒時間戳記，方便追蹤異常當下的狀態。
+    page.url 的存取包 try/except：如果 page 當下處於損毀/關閉狀態，
+    不能讓「記錄錯誤」這個動作本身又拋出例外，蓋掉真正要記錄的錯誤原因。"""
     ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    current_url = f" [URL: {page.url}]" if page else ""
+    if page:
+        try:
+            current_url = f" [URL: {page.url}]"
+        except Exception:
+            current_url = " [URL: 無法取得]"
+    else:
+        current_url = ""
     icon = _STATUS_ICON.get(status, "")
     line = f"[{ts}] {icon} {step_label}{current_url}" + (f"：{detail}" if detail else "")
     print(line)
     if log_lines is not None:
         log_lines.append(line)
     return line
+
+
+def safe_screenshot(page, path, log_lines=None):
+    """截圖失敗時只記錄、不拋出例外。避免「頁面本身已經有問題」時，連截圖都逾時，
+    導致真正有用的錯誤原因被截圖失敗這個次要例外蓋掉。"""
+    try:
+        page.screenshot(path=path, timeout=10000)
+        return True
+    except Exception as e:
+        log_detailed(f"截圖失敗（{path}）", "WARN", str(e), log_lines=log_lines, page=page)
+        return False
 
 
 def _otsu_threshold(gray_img):
@@ -139,6 +158,18 @@ def run_automation():
 
         max_retries = 3
         for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                # 重試前開一個全新的分頁，避免上一次嘗試若卡在「導覽到一半」的異常狀態，
+                # 連帶影響這一輪連最基本的登入頁都連不上（這正是上次 log 顯示的狀況：
+                # 第2、3次嘗試失敗時的網址跟第1次卡住時完全相同，代表分頁沒有真正重新
+                # 導覽成功）。context 沿用同一個瀏覽器 session（cookie），不會因此需要
+                # 重新登入或遺失既有 session。
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                page = context.new_page()
+
             log_lines = []
             step_status = {
                 "login": "未開始",
@@ -158,7 +189,7 @@ def run_automation():
                     username_input = page.locator("#username")
                     username_input.wait_for(state="visible", timeout=30000)
                     
-                    page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
+                    safe_screenshot(page, f"screenshots/1_login_page_{attempt}.png", log_lines)
                     log_detailed("步驟1-1 開啟登入頁", "OK", "登入頁面與欄位已完全載入", log_lines=log_lines, page=page)
                 except Exception as e:
                     step_status["login"] = f"失敗：無法開啟登入頁或找不到帳號欄位（{e}）"
@@ -184,7 +215,7 @@ def run_automation():
                 page.fill("#username", USERNAME)
                 page.fill("#password", PASSWORD)
                 page.fill("#kmuh-captcha", captcha_code)
-                page.screenshot(path=f"screenshots/2_filled_form_{attempt}.png")
+                safe_screenshot(page, f"screenshots/2_filled_form_{attempt}.png", log_lines)
                 log_detailed("步驟1-3 填寫帳密與驗證碼", "OK", log_lines=log_lines, page=page)
 
                 # 1-4. 點擊登入按鈕
@@ -197,41 +228,61 @@ def run_automation():
                 if page.locator("#username").is_visible():
                     step_status["login"] = "失敗：送出登入後仍停留在登入頁（可能驗證碼辨識錯誤或帳號密碼錯誤）"
                     log_detailed("步驟1 登入", "FAIL", "仍停留在登入頁，可能驗證碼或帳密錯誤", log_lines=log_lines, page=page)
-                    page.screenshot(path=f"screenshots/login_failed_{attempt}.png")
+                    safe_screenshot(page, f"screenshots/login_failed_{attempt}.png", log_lines)
                     _write_log(attempt, log_lines)
                     continue
 
                 step_status["login"] = "成功"
                 log_detailed("步驟1 登入", "OK", "登入成功", log_lines=log_lines, page=page)
-                page.screenshot(path=f"screenshots/3_logged_in.png")
+                safe_screenshot(page, f"screenshots/3_logged_in.png", log_lines)
 
-                # ---------- 步驟 2：轉址至營養部訂餐系統與智慧等待 ----------
-                tran_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
+                # ---------- 步驟 2：點擊「高醫醫療體系訂餐系統」連結，接住新分頁 ----------
+                # 確認過實際頁面上的連結是 target="_blank" 的 <a>，會另開新分頁：
+                # <a href="/Web/WebPortal/Home/TranUrl?sysid=583&url=...&inDBName=ora92"
+                #    target="_blank" title="高醫醫療體系訂餐系統">
+                # 不能用 page.goto() 直接打同一個網址替代——真的點擊連結時瀏覽器會自動帶上
+                # Referer 標頭，goto() 預設不會，若目標系統有做 Referer 來源檢查，
+                # 行為就會不一樣（這很可能是先前轉址不穩定的真正原因）。
+                login_tab = page
                 try:
-                    # 智慧等待轉址頁面載入，延長至 60 秒
-                    page.goto(tran_url, wait_until="networkidle", timeout=60000)
-                    
+                    portal_link = login_tab.locator("a[title='高醫醫療體系訂餐系統']")
+                    if portal_link.count() == 0:
+                        # title 屬性萬一被改掉的備援：改抓 href 裡包含 TranUrl 的連結
+                        portal_link = login_tab.locator("a[href*='TranUrl']").first
+                    portal_link.wait_for(state="visible", timeout=15000)
+                    with login_tab.context.expect_page(timeout=30000) as new_page_info:
+                        portal_link.click()
+                    order_tab = new_page_info.value
+                    order_tab.wait_for_load_state("domcontentloaded", timeout=30000)
+
                     # 智慧等待選單出現且可見
-                    shift_select = page.locator("select[name='shift_no']")
+                    shift_select = order_tab.locator("select[name='shift_no']")
                     shift_select.wait_for(state="visible", timeout=30000)
-                    
+
+                    page = order_tab  # 後續步驟都改在這個新分頁上操作
                     step_status["redirect"] = "成功"
-                    log_detailed("步驟2 轉址至訂餐系統", "OK", "轉址成功且選單已載入", log_lines=log_lines, page=page)
+                    log_detailed("步驟2 轉址至訂餐系統", "OK", "已點擊連結並成功開啟新分頁，選單已載入", log_lines=log_lines, page=page)
+
+                    # 原本登入用的分頁已經沒有用途，關掉保持乾淨（失敗不影響流程）
+                    try:
+                        login_tab.close()
+                    except Exception:
+                        pass
                 except Exception as e:
-                    step_status["redirect"] = f"失敗：轉址後找不到餐別選單（shift_no），原始錯誤：{e}"
-                    log_detailed("步驟2 轉址至訂餐系統", "FAIL", f"找不到 shift_no 選單：{e}", log_lines=log_lines, page=page)
-                    page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
+                    step_status["redirect"] = f"失敗：點擊連結後找不到訂餐頁的餐別選單（shift_no），原始錯誤：{e}"
+                    log_detailed("步驟2 轉址至訂餐系統", "FAIL", f"點擊連結或找不到 shift_no 選單：{e}", log_lines=log_lines, page=page)
+                    safe_screenshot(page, f"screenshots/redirect_failed_{attempt}.png", log_lines)
                     _write_log(attempt, log_lines)
                     raise
 
-                page.screenshot(path=f"screenshots/4_order_system_home.png")
+                safe_screenshot(page, f"screenshots/4_order_system_home.png", log_lines)
 
                 # ---------- 步驟 3：互動順序與智慧填寫 ----------
                 
                 # 3-1. 選擇餐別「午餐」 (shift_no = 2)
                 with page.expect_navigation(wait_until="networkidle", timeout=20000):
                     page.select_option("select[name='shift_no']", "2")
-                page.screenshot(path=f"screenshots/5_lunch_selected.png")
+                safe_screenshot(page, f"screenshots/5_lunch_selected.png", log_lines)
                 log_detailed("步驟3-1 選擇餐別（午餐）", "OK", log_lines=log_lines, page=page)
 
                 # 3-2. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
@@ -307,7 +358,7 @@ def run_automation():
                 except Exception as e:
                     log_detailed("步驟3-3 選擇日期與份數", "FAIL", str(e), log_lines=log_lines, page=page)
 
-                page.screenshot(path=f"screenshots/6_ready_to_submit.png")
+                safe_screenshot(page, f"screenshots/6_ready_to_submit.png", log_lines)
 
                 # 3-4. 點擊送出按鈕 (B2)
                 if not order_date_selected:
@@ -318,7 +369,7 @@ def run_automation():
                     submit_btn.wait_for(state="visible", timeout=10000)
                     submit_btn.click()
                     page.wait_for_timeout(3000)
-                    page.screenshot(path=f"screenshots/7_submitted.png")
+                    safe_screenshot(page, f"screenshots/7_submitted.png", log_lines)
                     step_status["order_submit"] = "成功：已點擊送出訂單按鈕 (B2)"
                     log_detailed("步驟3-4 訂餐送出", "OK", "已成功點擊送出按鈕", log_lines=log_lines, page=page)
 
@@ -340,7 +391,7 @@ def run_automation():
                 log_detailed("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines, page=page)
                 log_detailed("步驟3 訂餐送出", "FAIL" if step_status["order_submit"] == "未開始" else "WARN", step_status["order_submit"], log_lines=log_lines, page=page)
                 _write_log(attempt, log_lines)
-                page.screenshot(path=f"screenshots/error_attempt_{attempt}.png")
+                safe_screenshot(page, f"screenshots/error_attempt_{attempt}.png", log_lines)
                 if attempt == max_retries:
                     print(f"【高醫員工餐自動訂餐失敗】已達最大重試次數，錯誤原因: {e}")
                     browser.close()
