@@ -248,7 +248,11 @@ def run_automation():
                     portal_link = login_tab.locator("a[title='高醫醫療體系訂餐系統']")
                     if portal_link.count() == 0:
                         # title 屬性萬一被改掉的備援：改抓 href 裡包含 TranUrl 的連結
-                        portal_link = login_tab.locator("a[href*='TranUrl']").first
+                        portal_link = login_tab.locator("a[href*='TranUrl']")
+                    # 頁面上這個連結可能同時出現在多個地方（例如「常用功能」跟主選單各一個），
+                    # 內容完全相同、指向同一個網址，取第一個即可，避免 Playwright 嚴格模式
+                    # 因為比對到多個元素而報錯（strict mode violation）
+                    portal_link = portal_link.first
                     portal_link.wait_for(state="visible", timeout=15000)
                     with login_tab.context.expect_page(timeout=30000) as new_page_info:
                         portal_link.click()
