@@ -206,7 +206,7 @@ def run_automation():
                 page.screenshot(path=f"screenshots/3_logged_in.png")
 
                 # ---------- 步驟 2：轉址至營養部訂餐系統 ----------
-                tran_url = "https://www.kmuh.org.tw/Web/WebPortal/Home/TranUrl?sysid=583&url=https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/pwd.asp&inDBName=ora92"
+                tran_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
                 try:
                     page.goto(tran_url, wait_until="domcontentloaded", timeout=60000)
                     page.wait_for_selector("select[name='shift_no']", timeout=30000)
