@@ -1,7 +1,10 @@
+Content is user-generated and unverified.
+Learn about artifacts
 import os
 import re
 import time
 import datetime
+from urllib.parse import urljoin
 from collections import Counter
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageEnhance, ImageFilter
@@ -323,57 +326,65 @@ def run_automation():
                 try:
                     # 智慧等待：等待 networkidle 網路閒置，並將逾時延長至 60 秒
                     page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="networkidle", timeout=60000)
-                    
-                    # 智慧等待：確保帳號欄位已完全渲染且可見
+
+                    # 登入頁（有 #username）或「已登入的入口首頁」（有 TranUrl 連結）二擇一出現即可。
+                    # 重試時同一個瀏覽器 session 早已登入，再開入口網站會直接看到首頁，
+                    # 不會再有 #username；舊版只等 #username，所以第 2、3 次重試必定逾時。
                     username_input = page.locator("#username")
-                    username_input.wait_for(state="visible", timeout=30000)
-                    
+                    username_input.or_(page.locator("a[href*='TranUrl']")).first.wait_for(state="visible", timeout=30000)
+                    already_logged_in = not username_input.is_visible()
                     safe_screenshot(page, f"screenshots/1_login_page_{attempt}.png", log_lines)
-                    log_detailed("步驟1-1 開啟登入頁", "OK", "登入頁面與欄位已完全載入", log_lines=log_lines, page=page)
+                    if already_logged_in:
+                        log_detailed("步驟1-1 開啟入口網站", "OK", "已是登入狀態（沿用先前 session），略過登入", log_lines=log_lines, page=page)
+                    else:
+                        log_detailed("步驟1-1 開啟登入頁", "OK", "登入頁面與欄位已完全載入", log_lines=log_lines, page=page)
                 except Exception as e:
                     step_status["login"] = f"失敗：無法開啟登入頁或找不到帳號欄位（{e}）"
                     log_detailed("步驟1-1 開啟登入頁", "FAIL", str(e), log_lines=log_lines, page=page)
                     raise
 
-                # 1-2. 擷取驗證碼圖片並進行 OCR 辨識
-                captcha_img = page.locator("#kmuh-captcha-img")
-                captcha_img.wait_for(state="visible", timeout=10000)
-                captcha_img.screenshot(path=f"screenshots/captcha_{attempt}.png")
-                captcha_code = solve_captcha(f"screenshots/captcha_{attempt}.png")
-                log_detailed("步驟1-2 驗證碼辨識結果", "INFO", f"'{captcha_code}'", log_lines=log_lines, page=page)
+                if not already_logged_in:
+                    # 1-2. 擷取驗證碼圖片並進行 OCR 辨識
+                    captcha_img = page.locator("#kmuh-captcha-img")
+                    captcha_img.wait_for(state="visible", timeout=10000)
+                    captcha_img.screenshot(path=f"screenshots/captcha_{attempt}.png")
+                    captcha_code = solve_captcha(f"screenshots/captcha_{attempt}.png")
+                    log_detailed("步驟1-2 驗證碼辨識結果", "INFO", f"'{captcha_code}'", log_lines=log_lines, page=page)
 
-                if len(captcha_code) != 4:
-                    step_status["login"] = f"失敗：驗證碼辨識長度不正確（辨識出 '{captcha_code}'），重新整理重試"
-                    log_detailed("步驟1-2 驗證碼長度檢查", "FAIL", "非 4 碼，重新整理驗證碼後重試", log_lines=log_lines, page=page)
-                    _write_log(attempt, log_lines)
-                    captcha_img.click()
-                    page.wait_for_timeout(1500)
-                    continue
+                    if len(captcha_code) != 4:
+                        step_status["login"] = f"失敗：驗證碼辨識長度不正確（辨識出 '{captcha_code}'），重新整理重試"
+                        log_detailed("步驟1-2 驗證碼長度檢查", "FAIL", "非 4 碼，重新整理驗證碼後重試", log_lines=log_lines, page=page)
+                        _write_log(attempt, log_lines)
+                        captcha_img.click()
+                        page.wait_for_timeout(1500)
+                        continue
 
-                # 1-3. 填入帳號、密碼與驗證碼
-                page.fill("#username", USERNAME)
-                page.fill("#password", PASSWORD)
-                page.fill("#kmuh-captcha", captcha_code)
-                safe_screenshot(page, f"screenshots/2_filled_form_{attempt}.png", log_lines)
-                log_detailed("步驟1-3 填寫帳密與驗證碼", "OK", log_lines=log_lines, page=page)
+                    # 1-3. 填入帳號、密碼與驗證碼
+                    page.fill("#username", USERNAME)
+                    page.fill("#password", PASSWORD)
+                    page.fill("#kmuh-captcha", captcha_code)
+                    safe_screenshot(page, f"screenshots/2_filled_form_{attempt}.png", log_lines)
+                    log_detailed("步驟1-3 填寫帳密與驗證碼", "OK", log_lines=log_lines, page=page)
 
-                # 1-4. 點擊登入按鈕
-                page.click("#login")
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    pass
+                    # 1-4. 點擊登入按鈕
+                    page.click("#login")
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
 
-                if page.locator("#username").is_visible():
-                    step_status["login"] = "失敗：送出登入後仍停留在登入頁（可能驗證碼辨識錯誤或帳號密碼錯誤）"
-                    log_detailed("步驟1 登入", "FAIL", "仍停留在登入頁，可能驗證碼或帳密錯誤", log_lines=log_lines, page=page)
-                    safe_screenshot(page, f"screenshots/login_failed_{attempt}.png", log_lines)
-                    _write_log(attempt, log_lines)
-                    continue
+                    if page.locator("#username").is_visible():
+                        step_status["login"] = "失敗：送出登入後仍停留在登入頁（可能驗證碼辨識錯誤或帳號密碼錯誤）"
+                        log_detailed("步驟1 登入", "FAIL", "仍停留在登入頁，可能驗證碼或帳密錯誤", log_lines=log_lines, page=page)
+                        safe_screenshot(page, f"screenshots/login_failed_{attempt}.png", log_lines)
+                        _write_log(attempt, log_lines)
+                        continue
 
-                step_status["login"] = "成功"
-                log_detailed("步驟1 登入", "OK", "登入成功", log_lines=log_lines, page=page)
-                safe_screenshot(page, f"screenshots/3_logged_in.png", log_lines)
+                    step_status["login"] = "成功"
+                    log_detailed("步驟1 登入", "OK", "登入成功", log_lines=log_lines, page=page)
+                    safe_screenshot(page, f"screenshots/3_logged_in.png", log_lines)
+                else:
+                    step_status["login"] = "成功"
 
                 # 每日首次登入會跳出體溫彈窗，必須先處理掉，否則後面的連結會被攔截
                 dismiss_system_hint_modal(page, log_lines)
@@ -386,40 +397,77 @@ def run_automation():
                 # Referer 標頭，goto() 預設不會，若目標系統有做 Referer 來源檢查，
                 # 行為就會不一樣（這很可能是先前轉址不穩定的真正原因）。
                 login_tab = page
+                order_tab = None
                 try:
                     portal_link = login_tab.locator("a[title='高醫醫療體系訂餐系統']")
                     if portal_link.count() == 0:
                         # title 屬性萬一被改掉的備援：改抓 href 裡包含 TranUrl 的連結
                         portal_link = login_tab.locator("a[href*='TranUrl']")
-                    # 頁面上這個連結可能同時出現在多個地方（例如「常用功能」跟主選單各一個），
-                    # 內容完全相同、指向同一個網址，取第一個即可，避免 Playwright 嚴格模式
-                    # 因為比對到多個元素而報錯（strict mode violation）
+                    # 連結可能同時出現在「我的最愛」與主選單，內容相同，取第一個避免 strict mode 錯誤
                     portal_link = portal_link.first
                     portal_link.wait_for(state="visible", timeout=15000)
+                    portal_href = portal_link.get_attribute("href") or ""
+
                     # 保險：彈窗若延遲出現（或上一步沒處理到），點連結前再確認一次
                     dismiss_system_hint_modal(login_tab, log_lines, wait_ms=1500)
-                    with login_tab.context.expect_page(timeout=30000) as new_page_info:
-                        portal_link.click()
-                    order_tab = new_page_info.value
-                    order_tab.wait_for_load_state("domcontentloaded", timeout=30000)
+
+                    # 真的「點擊」連結（會帶 Referer），並接住 target="_blank" 開出的新分頁
+                    try:
+                        with login_tab.context.expect_page(timeout=20000) as new_page_info:
+                            portal_link.click()
+                        order_tab = new_page_info.value
+                        log_detailed("步驟2-1 點擊訂餐連結", "OK", f"已開啟新分頁：{order_tab.url}", log_lines=log_lines, page=login_tab)
+                    except Exception as e:
+                        # 點了但 20 秒內沒有新分頁：先看 context 裡是不是其實已經有別的分頁
+                        urls = [pg.url for pg in login_tab.context.pages]
+                        log_detailed("步驟2-1 點擊訂餐連結", "WARN", f"20 秒內未偵測到新分頁（{e}）；目前所有分頁：{urls}", log_lines=log_lines, page=login_tab)
+                        others = [pg for pg in login_tab.context.pages if pg is not login_tab]
+                        if others:
+                            order_tab = others[-1]
+                            log_detailed("步驟2-1 備援", "OK", f"改用既有分頁：{order_tab.url}", log_lines=log_lines, page=order_tab)
+                        else:
+                            # 備援：同一個分頁直接導覽到連結網址，並手動帶上 Referer（模擬點擊）
+                            full_url = urljoin(login_tab.url, portal_href)
+                            log_detailed("步驟2-1 備援", "INFO", f"改在同分頁導覽：{full_url}", log_lines=log_lines, page=login_tab)
+                            login_tab.goto(full_url, wait_until="domcontentloaded", timeout=45000, referer=login_tab.url)
+                            order_tab = login_tab
+
+                    # 訂餐系統是舊式 ASP 頁面，載入可能較慢：給 60 秒，並記下實際網址與標題
+                    order_tab.wait_for_load_state("domcontentloaded", timeout=60000)
+                    try:
+                        title = order_tab.title()
+                    except Exception:
+                        title = "?"
+                    log_detailed("步驟2-2 訂餐頁載入", "OK", f"標題：{title}", log_lines=log_lines, page=order_tab)
 
                     # 智慧等待選單出現且可見
                     shift_select = order_tab.locator("select[name='shift_no']")
                     shift_select.wait_for(state="visible", timeout=30000)
 
-                    page = order_tab  # 後續步驟都改在這個新分頁上操作
+                    page = order_tab  # 後續步驟都改在這個分頁上操作
                     step_status["redirect"] = "成功"
-                    log_detailed("步驟2 轉址至訂餐系統", "OK", "已點擊連結並成功開啟新分頁，選單已載入", log_lines=log_lines, page=page)
+                    log_detailed("步驟2 轉址至訂餐系統", "OK", "訂餐頁已載入，餐別選單可見", log_lines=log_lines, page=page)
 
-                    # 原本登入用的分頁已經沒有用途，關掉保持乾淨（失敗不影響流程）
-                    try:
-                        login_tab.close()
-                    except Exception:
-                        pass
+                    # 原本登入用的分頁若不是訂餐分頁就關掉保持乾淨（失敗不影響流程）
+                    if order_tab is not login_tab:
+                        try:
+                            login_tab.close()
+                        except Exception:
+                            pass
+
                 except Exception as e:
-                    step_status["redirect"] = f"失敗：點擊連結後找不到訂餐頁的餐別選單（shift_no），原始錯誤：{e}"
-                    log_detailed("步驟2 轉址至訂餐系統", "FAIL", f"點擊連結或找不到 shift_no 選單：{e}", log_lines=log_lines, page=page)
-                    safe_screenshot(page, f"screenshots/redirect_failed_{attempt}.png", log_lines)
+                    step_status["redirect"] = f"失敗：{e}"
+                    log_detailed("步驟2 轉址至訂餐系統", "FAIL", str(e), log_lines=log_lines, page=page)
+                    # 把「訂餐分頁」（如果有開出來）的實際狀態也記下來，方便判斷是網站沒回應、被擋、還是頁面改版
+                    for name, tab in (("訂餐分頁", order_tab), ("入口分頁", login_tab)):
+                        if tab is None:
+                            continue
+                        try:
+                            snippet = tab.inner_text("body", timeout=3000).strip().replace("\n", " ")[:300]
+                        except Exception as e2:
+                            snippet = f"(讀不到內容：{e2})"
+                        log_detailed(f"步驟2 失敗現場（{name}）", "INFO", f"內容開頭：{snippet}", log_lines=log_lines, page=tab)
+                        safe_screenshot(tab, f"screenshots/redirect_failed_{name}_{attempt}.png", log_lines)
                     _write_log(attempt, log_lines)
                     raise
 
