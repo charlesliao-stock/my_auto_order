@@ -5,8 +5,8 @@ on:
     types: [trigger-kmuh-order]  # 關鍵：接收來自 cron-job.org 的外部觸發訊號[cite: 3]
   workflow_dispatch:             # 保留手動觸發按鈕[cite: 3]
   schedule:
-    # 台灣時間週一～週五 03:00 (相當於 UTC 週日～週四 19:00)[cite: 3]
-    - cron: '0 19 * * 0-4'[cite: 3]
+    # 台灣時間週一～週五 00:00 (相當於 UTC 週日～週四 16:00)[cite: 3]
+    - cron: '0 16 * * 0-4'[cite: 3]
 
 jobs:
   order:
