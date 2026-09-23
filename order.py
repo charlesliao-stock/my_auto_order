@@ -18,12 +18,12 @@ _VALID_CAPTCHA_RE = re.compile(r"^[A-Z0-9]{4}$")
 _STATUS_ICON = {"OK": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️"}
 
 
-def log(step_label, status, detail="", log_lines=None):
-    """統一格式的細項 log：印到 console，並（若有提供 log_lines 清單）一併收集，
-    方便最後寫成一份可下載的 log 檔案，而不是只能從 GitHub Actions console 裡爬文找原因。"""
-    ts = datetime.datetime.now().strftime("%H:%M:%S")
+def log_detailed(step_label, status, detail="", log_lines=None, page=None):
+    """更詳細的 log 紀錄，包含當前網址與精確毫秒時間戳記，方便追蹤異常當下的狀態"""
+    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    current_url = f" [URL: {page.url}]" if page else ""
     icon = _STATUS_ICON.get(status, "")
-    line = f"[{ts}] {icon} {step_label}" + (f"：{detail}" if detail else "")
+    line = f"[{ts}] {icon} {step_label}{current_url}" + (f"：{detail}" if detail else "")
     print(line)
     if log_lines is not None:
         log_lines.append(line)
@@ -32,7 +32,7 @@ def log(step_label, status, detail="", log_lines=None):
 
 def _otsu_threshold(gray_img):
     """純 Python 實作 Otsu 自動門檻值 (不依賴 numpy/OpenCV)，
-    比固定門檻值 (例如寫死 150) 更能適應每張驗證碼圖片亮度不一致的狀況。"""
+    比固定門檻值更能適應每張驗證碼圖片亮度不一致的狀況。"""
     histogram = gray_img.histogram()
     total = sum(histogram)
     if total == 0:
@@ -61,13 +61,11 @@ def _otsu_threshold(gray_img):
 
 
 def _preprocess_variants(image_path):
-    """從同一張驗證碼原圖，產生多種前處理版本，增加至少一種能被 OCR 正確辨識的機率。"""
+    """從同一張驗證碼原圖，產生多種前處理版本，增加辨識率。"""
     base = Image.open(image_path)
-    # 放大 4 倍，字元邊緣更清楚，小圖放大有助於 tesseract 辨識筆畫
     base = base.resize((base.width * 4, base.height * 4), Image.Resampling.LANCZOS)
     gray = base.convert('L')
 
-    # 對比增強，讓文字與底色更好分離
     gray = ImageEnhance.Contrast(gray).enhance(2.0)
     gray = ImageEnhance.Sharpness(gray).enhance(2.0)
 
@@ -80,17 +78,17 @@ def _preprocess_variants(image_path):
     bin_otsu = bin_otsu.filter(ImageFilter.MedianFilter(size=3))
     variants.append(bin_otsu)
 
-    # 變體 2：反相版本 (有些驗證碼字比底色淺，反過來二值化效果更好)
+    # 變體 2：反相版本
     bin_otsu_inv = gray.point(lambda x, t=otsu_t: 255 if x < t else 0, '1')
     bin_otsu_inv = bin_otsu_inv.filter(ImageFilter.MedianFilter(size=3))
     variants.append(bin_otsu_inv)
 
-    # 變體 3：原本固定門檻 150 的版本，保留作為備援
+    # 變體 3：固定門檻 150 的版本
     bin_fixed = gray.point(lambda x: 0 if x < 150 else 255, '1')
     bin_fixed = bin_fixed.filter(ImageFilter.MedianFilter(size=3))
     variants.append(bin_fixed)
 
-    # 變體 4：Otsu 二值化 + 形態學開運算，去除細小雜點/干擾線
+    # 變體 4：Otsu 二值化 + 形態學開運算
     bin_denoised = bin_otsu.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
     variants.append(bin_denoised)
 
@@ -98,11 +96,9 @@ def _preprocess_variants(image_path):
 
 
 def solve_captcha(image_path):
-    """使用多種影像前處理 + 多種 OCR 設定，取多數決結果，以提升驗證碼辨識率"""
+    """使用多種影像前處理 + 多種 OCR 設定，取多數決結果"""
     try:
         variants = _preprocess_variants(image_path)
-
-        # 限制字元集為大寫英文與數字 4 碼
         psm_modes = [8, 7, 13]
         char_whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -123,7 +119,6 @@ def solve_captcha(image_path):
             print(f"驗證碼候選結果: {dict(votes)} -> 採用: {best}")
             return best
 
-        # 備援辨識
         fallback_config = f'-c tessedit_char_whitelist={char_whitelist} --psm 8'
         fallback_text = pytesseract.image_to_string(variants[0], config=fallback_config).strip()
         fallback = fallback_text.upper().replace(" ", "")[:4]
@@ -138,7 +133,6 @@ def run_automation():
     os.makedirs("screenshots", exist_ok=True)
 
     with sync_playwright() as p:
-        # 啟動背景瀏覽器
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 800})
         page = context.new_page()
@@ -153,31 +147,37 @@ def run_automation():
             }
 
             try:
-                log(f"=== 第 {attempt}/{max_retries} 次嘗試開始 ===", "INFO", log_lines=log_lines)
+                log_detailed(f"=== 第 {attempt}/{max_retries} 次嘗試開始 ===", "INFO", log_lines=log_lines, page=page)
 
-                # ---------- 步驟 1：登入 ----------
+                # ---------- 步驟 1：登入與智慧等待 ----------
                 try:
-                    page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_selector("#username", timeout=30000)
+                    # 智慧等待：等待 networkidle 網路閒置，並將逾時延長至 60 秒
+                    page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="networkidle", timeout=60000)
+                    
+                    # 智慧等待：確保帳號欄位已完全渲染且可見
+                    username_input = page.locator("#username")
+                    username_input.wait_for(state="visible", timeout=30000)
+                    
                     page.screenshot(path=f"screenshots/1_login_page_{attempt}.png")
-                    log("步驟1-1 開啟登入頁", "OK", log_lines=log_lines)
+                    log_detailed("步驟1-1 開啟登入頁", "OK", "登入頁面與欄位已完全載入", log_lines=log_lines, page=page)
                 except Exception as e:
                     step_status["login"] = f"失敗：無法開啟登入頁或找不到帳號欄位（{e}）"
-                    log("步驟1-1 開啟登入頁", "FAIL", str(e), log_lines=log_lines)
+                    log_detailed("步驟1-1 開啟登入頁", "FAIL", str(e), log_lines=log_lines, page=page)
                     raise
 
                 # 1-2. 擷取驗證碼圖片並進行 OCR 辨識
                 captcha_img = page.locator("#kmuh-captcha-img")
+                captcha_img.wait_for(state="visible", timeout=10000)
                 captcha_img.screenshot(path=f"screenshots/captcha_{attempt}.png")
                 captcha_code = solve_captcha(f"screenshots/captcha_{attempt}.png")
-                log("步驟1-2 驗證碼辨識結果", "INFO", f"'{captcha_code}'", log_lines=log_lines)
+                log_detailed("步驟1-2 驗證碼辨識結果", "INFO", f"'{captcha_code}'", log_lines=log_lines, page=page)
 
                 if len(captcha_code) != 4:
-                    step_status["login"] = f"失敗：驗證碼辨識結果長度不正確（辨識出 '{captcha_code}'），重新整理重試"
-                    log("步驟1-2 驗證碼長度檢查", "FAIL", "非 4 碼，重新整理驗證碼後重試", log_lines=log_lines)
+                    step_status["login"] = f"失敗：驗證碼辨識長度不正確（辨識出 '{captcha_code}'），重新整理重試"
+                    log_detailed("步驟1-2 驗證碼長度檢查", "FAIL", "非 4 碼，重新整理驗證碼後重試", log_lines=log_lines, page=page)
                     _write_log(attempt, log_lines)
                     captcha_img.click()
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(1500)
                     continue
 
                 # 1-3. 填入帳號、密碼與驗證碼
@@ -185,67 +185,75 @@ def run_automation():
                 page.fill("#password", PASSWORD)
                 page.fill("#kmuh-captcha", captcha_code)
                 page.screenshot(path=f"screenshots/2_filled_form_{attempt}.png")
-                log("步驟1-3 填寫帳密與驗證碼", "OK", log_lines=log_lines)
+                log_detailed("步驟1-3 填寫帳密與驗證碼", "OK", log_lines=log_lines, page=page)
 
                 # 1-4. 點擊登入按鈕
                 page.click("#login")
                 try:
-                    page.wait_for_load_state("networkidle", timeout=10000)
+                    page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
 
                 if page.locator("#username").is_visible():
                     step_status["login"] = "失敗：送出登入後仍停留在登入頁（可能驗證碼辨識錯誤或帳號密碼錯誤）"
-                    log("步驟1 登入", "FAIL", "仍停留在登入頁，可能驗證碼或帳密錯誤", log_lines=log_lines)
+                    log_detailed("步驟1 登入", "FAIL", "仍停留在登入頁，可能驗證碼或帳密錯誤", log_lines=log_lines, page=page)
                     page.screenshot(path=f"screenshots/login_failed_{attempt}.png")
                     _write_log(attempt, log_lines)
                     continue
 
                 step_status["login"] = "成功"
-                log("步驟1 登入", "OK", log_lines=log_lines)
+                log_detailed("步驟1 登入", "OK", "登入成功", log_lines=log_lines, page=page)
                 page.screenshot(path=f"screenshots/3_logged_in.png")
 
-                # ---------- 步驟 2：轉址至營養部訂餐系統 ----------
+                # ---------- 步驟 2：轉址至營養部訂餐系統與智慧等待 ----------
                 tran_url = "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
                 try:
-                    page.goto(tran_url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_selector("select[name='shift_no']", timeout=30000)
+                    # 智慧等待轉址頁面載入，延長至 60 秒
+                    page.goto(tran_url, wait_until="networkidle", timeout=60000)
+                    
+                    # 智慧等待選單出現且可見
+                    shift_select = page.locator("select[name='shift_no']")
+                    shift_select.wait_for(state="visible", timeout=30000)
+                    
                     step_status["redirect"] = "成功"
-                    log("步驟2 轉址至訂餐系統", "OK", log_lines=log_lines)
+                    log_detailed("步驟2 轉址至訂餐系統", "OK", "轉址成功且選單已載入", log_lines=log_lines, page=page)
                 except Exception as e:
-                    step_status["redirect"] = f"失敗：轉址後找不到訂餐頁的餐別選單（shift_no），原始錯誤：{e}"
-                    log("步驟2 轉址至訂餐系統", "FAIL", f"找不到 shift_no 選單，可能未成功轉址：{e}", log_lines=log_lines)
+                    step_status["redirect"] = f"失敗：轉址後找不到餐別選單（shift_no），原始錯誤：{e}"
+                    log_detailed("步驟2 轉址至訂餐系統", "FAIL", f"找不到 shift_no 選單：{e}", log_lines=log_lines, page=page)
                     page.screenshot(path=f"screenshots/redirect_failed_{attempt}.png")
                     _write_log(attempt, log_lines)
                     raise
 
                 page.screenshot(path=f"screenshots/4_order_system_home.png")
 
-                # ---------- 步驟 3：互動順序（餐別 -> 餐盒類別 -> 填資料與選日期 -> 送出） ----------
+                # ---------- 步驟 3：互動順序與智慧填寫 ----------
                 
                 # 3-1. 選擇餐別「午餐」 (shift_no = 2)
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                with page.expect_navigation(wait_until="networkidle", timeout=20000):
                     page.select_option("select[name='shift_no']", "2")
                 page.screenshot(path=f"screenshots/5_lunch_selected.png")
-                log("步驟3-1 選擇餐別（午餐）", "OK", log_lines=log_lines)
+                log_detailed("步驟3-1 選擇餐別（午餐）", "OK", log_lines=log_lines, page=page)
 
                 # 3-2. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
                 try:
                     classkind_266 = page.locator("input[name='classkind'][value='266']")
+                    classkind_266.wait_for(state="visible", timeout=10000)
                     if classkind_266.is_checked():
-                        log("步驟3-2 選擇餐盒類別", "OK", "「健康均衡餐(葷)」已是預設選項，無需切換", log_lines=log_lines)
+                        log_detailed("步驟3-2 選擇餐盒類別", "OK", "「健康均衡餐(葷)」已是預設選項", log_lines=log_lines, page=page)
                     else:
-                        with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                        with page.expect_navigation(wait_until="networkidle", timeout=20000):
                             classkind_266.check()
-                        log("步驟3-2 選擇餐盒類別", "OK", "已切換為「健康均衡餐(葷)」", log_lines=log_lines)
+                        log_detailed("步驟3-2 選擇餐盒類別", "OK", "已切換為「健康均衡餐(葷)」", log_lines=log_lines, page=page)
                 except Exception as e:
-                    log("步驟3-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines)
-                page.wait_for_timeout(500)
+                    log_detailed("步驟3-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines, page=page)
+                page.wait_for_timeout(1000)
 
                 # 3-3. 填寫科室分機與尋找可訂日期份數
                 order_date_selected = False
                 try:
-                    page.fill("input[name='depttel']", DEPT_TEL)
+                    dept_input = page.locator("input[name='depttel']")
+                    dept_input.wait_for(state="visible", timeout=10000)
+                    dept_input.fill(DEPT_TEL)
 
                     qty_selects = page.locator("select[name^='odrpcs']")
                     count = qty_selects.count()
@@ -281,42 +289,44 @@ def run_automation():
                             if latest_options:
                                 fallback_count = str(max(int(v) for v in latest_options))
                                 chosen = (latest_sel, fallback_count, latest_digits)
-                                log(
+                                log_detailed(
                                     "步驟3-3 選擇日期與份數", "WARN",
                                     f"最新可訂日期剩餘份數不足 {MEAL_COUNT} 份，改訂購剩餘可提供的 {fallback_count} 份",
-                                    log_lines=log_lines,
+                                    log_lines=log_lines, page=page
                                 )
 
                         if chosen:
                             target_sel, target_count, target_digits = chosen
                             target_sel.select_option(target_count)
                             order_date_selected = True
-                            log("步驟3-3 選擇日期與份數", "OK", f"日期(數字){target_digits} -> {target_count} 份", log_lines=log_lines)
+                            log_detailed("步驟3-3 選擇日期與份數", "OK", f"日期(數字){target_digits} -> {target_count} 份", log_lines=log_lines, page=page)
                         else:
-                            log("步驟3-3 選擇日期與份數", "FAIL", "找到開放中的日期，但剩餘份數選單為空", log_lines=log_lines)
+                            log_detailed("步驟3-3 選擇日期與份數", "FAIL", "找到開放中的日期，但剩餘份數選單為空", log_lines=log_lines, page=page)
                     else:
-                        log("步驟3-3 選擇日期與份數", "FAIL", "目前所有日期的午餐皆已訂完（剩餘份數為 0）", log_lines=log_lines)
+                        log_detailed("步驟3-3 選擇日期與份數", "FAIL", "目前所有日期的午餐皆已訂完（剩餘份數為 0）", log_lines=log_lines, page=page)
                 except Exception as e:
-                    log("步驟3-3 選擇日期與份數", "FAIL", str(e), log_lines=log_lines)
+                    log_detailed("步驟3-3 選擇日期與份數", "FAIL", str(e), log_lines=log_lines, page=page)
 
                 page.screenshot(path=f"screenshots/6_ready_to_submit.png")
 
                 # 3-4. 點擊送出按鈕 (B2)
                 if not order_date_selected:
                     step_status["order_submit"] = "未送出：沒有找到可訂購的日期/份數，避免送出空白訂單"
-                    log("步驟3-4 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines)
+                    log_detailed("步驟3-4 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines, page=page)
                 else:
-                    page.click("input[name='B2']")
+                    submit_btn = page.locator("input[name='B2']")
+                    submit_btn.wait_for(state="visible", timeout=10000)
+                    submit_btn.click()
                     page.wait_for_timeout(3000)
                     page.screenshot(path=f"screenshots/7_submitted.png")
                     step_status["order_submit"] = "成功：已點擊送出訂單按鈕 (B2)"
-                    log("步驟3-4 訂餐送出", "OK", "已成功點擊送出按鈕", log_lines=log_lines)
+                    log_detailed("步驟3-4 訂餐送出", "OK", "已成功點擊送出按鈕", log_lines=log_lines, page=page)
 
                 # ---------- 本次嘗試總結 ----------
-                log("=== 本次嘗試步驟總結 ===", "INFO", log_lines=log_lines)
-                log("步驟1 登入", "OK" if step_status["login"] == "成功" else "FAIL", step_status["login"], log_lines=log_lines)
-                log("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines)
-                log("步驟3 訂餐送出", "OK" if "成功" in step_status["order_submit"] else "WARN", step_status["order_submit"], log_lines=log_lines)
+                log_detailed("=== 本次嘗試步驟總結 ===", "INFO", log_lines=log_lines, page=page)
+                log_detailed("步驟1 登入", "OK" if step_status["login"] == "成功" else "FAIL", step_status["login"], log_lines=log_lines, page=page)
+                log_detailed("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines, page=page)
+                log_detailed("步驟3 訂餐送出", "OK" if "成功" in step_status["order_submit"] else "WARN", step_status["order_submit"], log_lines=log_lines, page=page)
                 _write_log(attempt, log_lines)
 
                 print("【高醫員工餐自動訂餐流程執行完成】")
@@ -324,11 +334,11 @@ def run_automation():
                 return True
 
             except Exception as e:
-                log(f"第 {attempt} 次執行發生錯誤", "FAIL", str(e), log_lines=log_lines)
-                log("=== 本次嘗試步驟總結（因錯誤中斷）===", "INFO", log_lines=log_lines)
-                log("步驟1 登入", "OK" if step_status["login"] == "成功" else "FAIL", step_status["login"], log_lines=log_lines)
-                log("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines)
-                log("步驟3 訂餐送出", "FAIL" if step_status["order_submit"] == "未開始" else "WARN", step_status["order_submit"], log_lines=log_lines)
+                log_detailed(f"第 {attempt} 次執行發生錯誤", "FAIL", str(e), log_lines=log_lines, page=page)
+                log_detailed("=== 本次嘗試步驟總結（因錯誤中斷）===", "INFO", log_lines=log_lines, page=page)
+                log_detailed("步驟1 登入", "OK" if step_status["login"] == "成功" else "FAIL", step_status["login"], log_lines=log_lines, page=page)
+                log_detailed("步驟2 轉址訂餐系統", "OK" if step_status["redirect"] == "成功" else "FAIL", step_status["redirect"], log_lines=log_lines, page=page)
+                log_detailed("步驟3 訂餐送出", "FAIL" if step_status["order_submit"] == "未開始" else "WARN", step_status["order_submit"], log_lines=log_lines, page=page)
                 _write_log(attempt, log_lines)
                 page.screenshot(path=f"screenshots/error_attempt_{attempt}.png")
                 if attempt == max_retries:
