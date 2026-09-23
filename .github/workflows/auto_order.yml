@@ -2,52 +2,51 @@ name: KMUH Auto Meal Order with Screenshots
 
 on:
   repository_dispatch:
-    types: [trigger-kmuh-order]  # 關鍵：接收來自 cron-job.org 的外部觸發訊號[cite: 3]
-  workflow_dispatch:             # 保留手動觸發按鈕[cite: 3]
+    types: [trigger-kmuh-order]
+  workflow_dispatch:
   schedule:
-    # 台灣時間週一～週五 00:00 (相當於 UTC 週日～週四 16:00)[cite: 3]
-    - cron: '0 16 * * 0-4'[cite: 3]
+    - cron: '0 16 * * 0-4'
 
 jobs:
   order:
-    runs-on: ubuntu-latest[cite: 3]
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code[cite: 3]
-        uses: actions/checkout@v4[cite: 3]
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Set up Python[cite: 3]
-        uses: actions/setup-python@v5[cite: 3]
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'[cite: 3]
+          python-version: '3.10'
 
-      - name: Install system dependencies & Tesseract OCR[cite: 3]
+      - name: Install system dependencies & Tesseract OCR
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
 
-      - name: Install Python dependencies[cite: 3]
+      - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
           playwright install chromium
           playwright install-deps chromium
 
-      - name: Run Auto Order Script[cite: 3]
+      - name: Run Auto Order Script
         env:
-          KMUH_USERNAME: ${{ secrets.KMUH_USERNAME }}[cite: 3]
-          KMUH_PASSWORD: ${{ secrets.KMUH_PASSWORD }}[cite: 3]
-          MEAL_COUNT: ${{ secrets.MEAL_COUNT }}[cite: 3]
+          KMUH_USERNAME: ${{ secrets.KMUH_USERNAME }}
+          KMUH_PASSWORD: ${{ secrets.KMUH_PASSWORD }}
+          MEAL_COUNT: ${{ secrets.MEAL_COUNT }}
         run: |
           python order.py
 
-      - name: Upload Screenshots as Artifacts[cite: 3]
-        if: always()[cite: 3]
-        uses: actions/upload-artifact@v4[cite: 3]
+      - name: Upload Screenshots as Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: execution-screenshots[cite: 3]
-          path: screenshots/[cite: 3]
+          name: execution-screenshots
+          path: screenshots/
 
-      - name: Send LINE Notification (Success)[cite: 3]
-        if: success()[cite: 3]
+      - name: Send LINE Notification (Success)
+        if: success()
         run: |
           curl -X POST https://api.line.me/v2/bot/message/push \
           -H "Content-Type: application/json" \
@@ -62,8 +61,8 @@ jobs:
             ]
           }'
 
-      - name: Send LINE Notification (Failure)[cite: 3]
-        if: failure()[cite: 3]
+      - name: Send LINE Notification (Failure)
+        if: failure()
         run: |
           curl -X POST https://api.line.me/v2/bot/message/push \
           -H "Content-Type: application/json" \
