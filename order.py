@@ -17,6 +17,23 @@ _VALID_CAPTCHA_RE = re.compile(r"^[A-Z0-9]{4}$")
 
 _STATUS_ICON = {"OK": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️"}
 
+# 餐盒類別代碼 -> 顯示名稱，目前程式固定訂購 266（健康均衡餐(葷)），
+# 這裡做成對照表方便訂餐結果回報時顯示中文名稱，之後若要改訂 267 也只需改這一個常數
+CLASSKIND_VALUE = "266"
+CLASSKIND_NAME_MAP = {"266": "健康均衡餐(葷)", "267": "低脂窈窕餐(葷)"}
+
+
+def roc_digits_to_date_str(digits):
+    """把 odrpcs<民國年月日> 的數字（例如 1150930）轉成一般看得懂的日期字串（例如 2026/9/30）"""
+    try:
+        s = str(digits).zfill(7)  # 民國年(3碼) + 月(2碼) + 日(2碼)
+        roc_year = int(s[:-4])
+        month = int(s[-4:-2])
+        day = int(s[-2:])
+        return f"{roc_year + 1911}/{month}/{day}"
+    except Exception:
+        return f"民國年月日代碼:{digits}"
+
 
 def log_detailed(step_label, status, detail="", log_lines=None, page=None):
     """更詳細的 log 紀錄，包含當前網址與精確毫秒時間戳記，方便追蹤異常當下的狀態。
@@ -284,27 +301,35 @@ def run_automation():
                 # ---------- 步驟 3：互動順序與智慧填寫 ----------
                 
                 # 3-1. 選擇餐別「午餐」 (shift_no = 2)
-                with page.expect_navigation(wait_until="networkidle", timeout=20000):
-                    page.select_option("select[name='shift_no']", "2")
+                # 跟 3-2 選餐盒類別一樣的道理：OnChange 只有在「值真的改變」時才會觸發
+                # form11.submit() 整頁重載。先判斷目前是否已經是 "2"，避免萬一伺服器 session
+                # 記得上次選過午餐、頁面一進來就是 "2" 時，白白空等一次不會發生的導覽到逾時。
+                shift_select_el = page.locator("select[name='shift_no']")
+                if shift_select_el.input_value() == "2":
+                    log_detailed("步驟3-1 選擇餐別（午餐）", "OK", "已是預設選項，無需切換", log_lines=log_lines, page=page)
+                else:
+                    with page.expect_navigation(wait_until="networkidle", timeout=20000):
+                        page.select_option("select[name='shift_no']", "2")
+                    log_detailed("步驟3-1 選擇餐別（午餐）", "OK", "已切換為午餐", log_lines=log_lines, page=page)
                 safe_screenshot(page, f"screenshots/5_lunch_selected.png", log_lines)
-                log_detailed("步驟3-1 選擇餐別（午餐）", "OK", log_lines=log_lines, page=page)
 
                 # 3-2. 選擇餐盒類別「健康均衡餐(葷)」 (value="266")
                 try:
-                    classkind_266 = page.locator("input[name='classkind'][value='266']")
+                    classkind_266 = page.locator(f"input[name='classkind'][value='{CLASSKIND_VALUE}']")
                     classkind_266.wait_for(state="visible", timeout=10000)
                     if classkind_266.is_checked():
-                        log_detailed("步驟3-2 選擇餐盒類別", "OK", "「健康均衡餐(葷)」已是預設選項", log_lines=log_lines, page=page)
+                        log_detailed("步驟3-2 選擇餐盒類別", "OK", f"「{CLASSKIND_NAME_MAP[CLASSKIND_VALUE]}」已是預設選項", log_lines=log_lines, page=page)
                     else:
                         with page.expect_navigation(wait_until="networkidle", timeout=20000):
                             classkind_266.check()
-                        log_detailed("步驟3-2 選擇餐盒類別", "OK", "已切換為「健康均衡餐(葷)」", log_lines=log_lines, page=page)
+                        log_detailed("步驟3-2 選擇餐盒類別", "OK", f"已切換為「{CLASSKIND_NAME_MAP[CLASSKIND_VALUE]}」", log_lines=log_lines, page=page)
                 except Exception as e:
                     log_detailed("步驟3-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines, page=page)
                 page.wait_for_timeout(1000)
 
-                # 3-3. 填寫科室分機與尋找可訂日期份數
+                # 3-3. 填寫科室分機，並鎖定「最後一筆可訂購日期」（更早的日期一律不理會）
                 order_date_selected = False
+                order_report = None  # (日期數字, 份數) 供 3-4 組回報訊息用
                 try:
                     dept_input = page.locator("input[name='depttel']")
                     dept_input.wait_for(state="visible", timeout=10000)
@@ -313,11 +338,13 @@ def run_automation():
                     qty_selects = page.locator("select[name^='odrpcs']")
                     count = qty_selects.count()
 
-                    candidates = []  
+                    candidates = []
                     for i in range(count):
                         sel = qty_selects.nth(i)
                         if sel.get_attribute("disabled") is not None:
-                            continue  
+                            # disabled 可能代表「當天已無剩餘份數」或「已過當天訂購截止時間」，
+                            # 兩種情況都無法訂購，這裡不區分原因，一律跳過
+                            continue
                         name = sel.get_attribute("name") or ""
                         digits = "".join(ch for ch in name if ch.isdigit())
                         if not digits:
@@ -331,40 +358,43 @@ def run_automation():
                         candidates.append((int(digits), sel, option_values))
 
                     if candidates:
+                        # 只鎖定日期最新（最後一筆）的可訂購日期，不再往前找其他日期
                         candidates.sort(key=lambda x: x[0], reverse=True)
+                        target_digits, target_sel, target_options = candidates[0]
 
-                        chosen = None
-                        for date_digits, sel, option_values in candidates:
-                            if MEAL_COUNT in option_values:
-                                chosen = (sel, MEAL_COUNT, date_digits)
-                                break
+                        if MEAL_COUNT in target_options:
+                            target_count = MEAL_COUNT
+                        elif target_options:
+                            target_count = str(max(int(v) for v in target_options))
+                            log_detailed(
+                                "步驟3-3 選擇日期與份數", "WARN",
+                                f"最後一筆可訂購日期（{roc_digits_to_date_str(target_digits)}）"
+                                f"剩餘份數不足 {MEAL_COUNT} 份，改訂購剩餘可提供的 {target_count} 份",
+                                log_lines=log_lines, page=page,
+                            )
+                        else:
+                            target_count = None
 
-                        if chosen is None:
-                            latest_digits, latest_sel, latest_options = candidates[0]
-                            if latest_options:
-                                fallback_count = str(max(int(v) for v in latest_options))
-                                chosen = (latest_sel, fallback_count, latest_digits)
-                                log_detailed(
-                                    "步驟3-3 選擇日期與份數", "WARN",
-                                    f"最新可訂日期剩餘份數不足 {MEAL_COUNT} 份，改訂購剩餘可提供的 {fallback_count} 份",
-                                    log_lines=log_lines, page=page
-                                )
-
-                        if chosen:
-                            target_sel, target_count, target_digits = chosen
+                        if target_count:
                             target_sel.select_option(target_count)
                             order_date_selected = True
-                            log_detailed("步驟3-3 選擇日期與份數", "OK", f"日期(數字){target_digits} -> {target_count} 份", log_lines=log_lines, page=page)
+                            order_report = (target_digits, target_count)
+                            log_detailed(
+                                "步驟3-3 選擇日期與份數", "OK",
+                                f"{roc_digits_to_date_str(target_digits)} -> {target_count} 份",
+                                log_lines=log_lines, page=page,
+                            )
                         else:
-                            log_detailed("步驟3-3 選擇日期與份數", "FAIL", "找到開放中的日期，但剩餘份數選單為空", log_lines=log_lines, page=page)
+                            log_detailed("步驟3-3 選擇日期與份數", "FAIL", "最後一筆可訂購日期的份數選單為空", log_lines=log_lines, page=page)
                     else:
-                        log_detailed("步驟3-3 選擇日期與份數", "FAIL", "目前所有日期的午餐皆已訂完（剩餘份數為 0）", log_lines=log_lines, page=page)
+                        log_detailed("步驟3-3 選擇日期與份數", "FAIL", "目前所有日期皆無法訂購（可能已截止收單，或剩餘份數為 0）", log_lines=log_lines, page=page)
                 except Exception as e:
                     log_detailed("步驟3-3 選擇日期與份數", "FAIL", str(e), log_lines=log_lines, page=page)
 
                 safe_screenshot(page, f"screenshots/6_ready_to_submit.png", log_lines)
 
                 # 3-4. 點擊送出按鈕 (B2)
+                order_summary = None
                 if not order_date_selected:
                     step_status["order_submit"] = "未送出：沒有找到可訂購的日期/份數，避免送出空白訂單"
                     log_detailed("步驟3-4 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines, page=page)
@@ -374,8 +404,14 @@ def run_automation():
                     submit_btn.click()
                     page.wait_for_timeout(3000)
                     safe_screenshot(page, f"screenshots/7_submitted.png", log_lines)
-                    step_status["order_submit"] = "成功：已點擊送出訂單按鈕 (B2)"
-                    log_detailed("步驟3-4 訂餐送出", "OK", "已成功點擊送出按鈕", log_lines=log_lines, page=page)
+
+                    target_digits, target_count = order_report
+                    order_date_str = roc_digits_to_date_str(target_digits)
+                    classkind_name = CLASSKIND_NAME_MAP.get(CLASSKIND_VALUE, CLASSKIND_VALUE)
+                    order_summary = f"{order_date_str} {classkind_name} {target_count}份，訂餐成功"
+
+                    step_status["order_submit"] = f"成功：{order_summary}"
+                    log_detailed("步驟3-4 訂餐送出", "OK", order_summary, log_lines=log_lines, page=page)
 
                 # ---------- 本次嘗試總結 ----------
                 log_detailed("=== 本次嘗試步驟總結 ===", "INFO", log_lines=log_lines, page=page)
@@ -384,7 +420,21 @@ def run_automation():
                 log_detailed("步驟3 訂餐送出", "OK" if "成功" in step_status["order_submit"] else "WARN", step_status["order_submit"], log_lines=log_lines, page=page)
                 _write_log(attempt, log_lines)
 
-                print("【高醫員工餐自動訂餐流程執行完成】")
+                if order_summary:
+                    print(f"【高醫員工餐自動訂餐流程執行完成】{order_summary}")
+                else:
+                    print("【高醫員工餐自動訂餐流程執行完成】（本次未送出訂單，詳見上方 log）")
+
+                # 把訂餐結果寫進 GITHUB_OUTPUT，方便 workflow 後續步驟（例如 LINE 通知）
+                # 直接引用這個值，不用自己重新組字串
+                github_output_path = os.environ.get("GITHUB_OUTPUT")
+                if github_output_path:
+                    try:
+                        with open(github_output_path, "a", encoding="utf-8") as f:
+                            f.write(f"order_summary={order_summary or '本次未送出訂單'}\n")
+                    except Exception as e:
+                        print(f"寫入 GITHUB_OUTPUT 失敗: {e}")
+
                 browser.close()
                 return True
 
