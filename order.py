@@ -173,22 +173,35 @@ def solve_captcha(image_path):
 #
 # 依入口網頁原始碼，彈窗結構如下：
 #   - 「無，我的體溫(°C)是:」單選鈕帶 data-show-temp，點了會展開體溫表(#temp-table)
-#   - 體溫表內每個溫度是 [data-upload-temp="36"] 之類的元素，點下去就 AJAX 送出
+#   - 體溫表內每個溫度是 [data-upload-temp="36.0"] 之類的元素（35.1~37.4，一位小數），點下去就 AJAX 送出
+#     37.5 那顆按鈕帶的是 data-show-url（不是 data-upload-temp），代表發燒、會開新分頁，程式不會選到
 #   - 「體溫超過37.5°C…」單選鈕帶 data-show-url，會【開新分頁】跳到體溫網站，絕對不能點
 #   - 「進行填寫」(#overtime-fill) 也是開新分頁，不能點
 #   - 若同時有延長工時提醒(#overtime-hint)，送出體溫後彈窗不會自動關，要按右上角 ×
 #     (.portal-modal-close)
 TEMPERATURE_VALUE = os.environ.get("KMUH_TEMPERATURE", "36")
 
+# 不只靠 id：外層容器 id 若被網站改掉，仍可用裡面固定存在的 #tempature-panel 找到它
+MODAL_SELECTOR = "#system-hint-modal, .modal:has(#tempature-panel)"
+
 _FORCE_CLOSE_MODAL_JS = """
 () => {
-  document.querySelectorAll('#system-hint-modal, .modal.show').forEach(m => m.remove());
+  document.querySelectorAll('#system-hint-modal, .modal.show, .modal:has(#tempature-panel)').forEach(m => m.remove());
   document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
   document.body.classList.remove('modal-open');
   document.body.style.removeProperty('overflow');
   document.body.style.removeProperty('padding-right');
 }
 """
+
+
+def _blocking_overlay_present(page):
+    """目前是否還有可見的彈窗或遮罩（會攔截後面的點擊）。"""
+    try:
+        return (page.locator(MODAL_SELECTOR).first.is_visible()
+                or page.locator(".modal-backdrop").first.is_visible())
+    except Exception:
+        return False
 
 
 def _pick_temperature_value(options, wanted):
@@ -244,7 +257,7 @@ def dismiss_system_hint_modal(page, log_lines=None, wait_ms=8000):
     方案 2（優先）：點「無，我的體溫」-> 點 36 度送出 -> 按 × 關閉彈窗。
     方案 1（備援）：任何一步失敗，就用 JS 直接把彈窗與遮罩從 DOM 移除。
     沒出現彈窗（例如當天已填過）就直接略過，回傳 False；有處理回傳 True。"""
-    modal = page.locator("#system-hint-modal")
+    modal = page.locator(MODAL_SELECTOR).first
     try:
         modal.wait_for(state="visible", timeout=wait_ms)
     except Exception:
@@ -279,7 +292,7 @@ def dismiss_system_hint_modal(page, log_lines=None, wait_ms=8000):
     try:
         page.evaluate(_FORCE_CLOSE_MODAL_JS)
         page.wait_for_timeout(500)
-        if page.locator("#system-hint-modal").count() == 0:
+        if page.locator(MODAL_SELECTOR).count() == 0:
             log_detailed("步驟1-5 體溫彈窗", "OK", "已強制移除彈窗", log_lines=log_lines, page=page)
             safe_screenshot(page, "screenshots/popup_after.png", log_lines)
             return True
@@ -408,6 +421,11 @@ def run_automation():
 
                     # 保險：彈窗若延遲出現（或上一步沒處理到），點連結前再確認一次
                     dismiss_system_hint_modal(login_tab, log_lines, wait_ms=1500)
+                    if _blocking_overlay_present(login_tab):
+                        log_detailed("步驟2-0 清除遮罩", "WARN", "點連結前仍偵測到彈窗/遮罩，強制移除", log_lines=log_lines, page=login_tab)
+                        safe_screenshot(login_tab, "screenshots/overlay_before_click.png", log_lines)
+                        login_tab.evaluate(_FORCE_CLOSE_MODAL_JS)
+                        login_tab.wait_for_timeout(300)
 
                     # 真的「點擊」連結（會帶 Referer），並接住 target="_blank" 開出的新分頁
                     try:
