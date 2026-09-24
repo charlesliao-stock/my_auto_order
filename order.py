@@ -500,9 +500,10 @@ def run_automation():
                     log_detailed("步驟3-2 選擇餐盒類別", "FAIL", str(e), log_lines=log_lines, page=page)
                 page.wait_for_timeout(1000)
 
-                # 3-3. 填寫科室分機，並鎖定「最後一筆可訂購日期」（更早的日期一律不理會）
+                # 3-3. 填寫科室分機，只鎖定頁面上「最新日期」（不能訂就不訂，不往回找其他日期）
                 order_date_selected = False
                 order_report = None  # (日期數字, 份數) 供 3-4 組回報訊息用
+                zero_slot_message = None  # 最新日期已 disable（份數為 0）時的回報訊息
                 try:
                     dept_input = page.locator("input[name='depttel']")
                     dept_input.wait_for(state="visible", timeout=10000)
@@ -511,56 +512,64 @@ def run_automation():
                     qty_selects = page.locator("select[name^='odrpcs']")
                     count = qty_selects.count()
 
-                    candidates = []
+                    # 先收集頁面上「所有」日期（包含已 disabled 的），再找出日期最新的那一筆。
+                    # 只看最新日期：如果它不能訂，就直接不訂，絕不退回去訂更早的日期。
+                    all_dates = []
                     for i in range(count):
                         sel = qty_selects.nth(i)
-                        if sel.get_attribute("disabled") is not None:
-                            # disabled 可能代表「當天已無剩餘份數」或「已過當天訂購截止時間」，
-                            # 兩種情況都無法訂購，這裡不區分原因，一律跳過
-                            continue
                         name = sel.get_attribute("name") or ""
                         digits = "".join(ch for ch in name if ch.isdigit())
                         if not digits:
                             continue
-                        option_values = [
-                            v for v in sel.locator("option").evaluate_all(
-                                "els => els.map(e => e.value)"
-                            )
-                            if v.strip().isdigit()
-                        ]
-                        candidates.append((int(digits), sel, option_values))
+                        all_dates.append((int(digits), sel))
 
-                    if candidates:
-                        # 只鎖定日期最新（最後一筆）的可訂購日期，不再往前找其他日期
-                        candidates.sort(key=lambda x: x[0], reverse=True)
-                        target_digits, target_sel, target_options = candidates[0]
-
-                        if MEAL_COUNT in target_options:
-                            target_count = MEAL_COUNT
-                        elif target_options:
-                            target_count = str(max(int(v) for v in target_options))
-                            log_detailed(
-                                "步驟3-3 選擇日期與份數", "WARN",
-                                f"最後一筆可訂購日期（{roc_digits_to_date_str(target_digits)}）"
-                                f"剩餘份數不足 {MEAL_COUNT} 份，改訂購剩餘可提供的 {target_count} 份",
-                                log_lines=log_lines, page=page,
-                            )
-                        else:
-                            target_count = None
-
-                        if target_count:
-                            target_sel.select_option(target_count)
-                            order_date_selected = True
-                            order_report = (target_digits, target_count)
-                            log_detailed(
-                                "步驟3-3 選擇日期與份數", "OK",
-                                f"{roc_digits_to_date_str(target_digits)} -> {target_count} 份",
-                                log_lines=log_lines, page=page,
-                            )
-                        else:
-                            log_detailed("步驟3-3 選擇日期與份數", "FAIL", "最後一筆可訂購日期的份數選單為空", log_lines=log_lines, page=page)
+                    if not all_dates:
+                        log_detailed("步驟3-3 選擇日期與份數", "FAIL", "頁面上找不到任何日期的份數選單", log_lines=log_lines, page=page)
                     else:
-                        log_detailed("步驟3-3 選擇日期與份數", "FAIL", "目前所有日期皆無法訂購（可能已截止收單，或剩餘份數為 0）", log_lines=log_lines, page=page)
+                        target_digits, target_sel = max(all_dates, key=lambda x: x[0])
+                        target_date_str = roc_digits_to_date_str(target_digits)
+
+                        if target_sel.get_attribute("disabled") is not None:
+                            # disabled 可能代表「當天已無剩餘份數」或「已過訂購截止時間」，
+                            # 不論原因，最新日期不能訂就整筆不送出
+                            zero_slot_message = f"執行成功，但{target_date_str} 可訂購的份數為 0份"
+                            log_detailed(
+                                "步驟3-3 選擇日期與份數", "INFO",
+                                f"{zero_slot_message}（可能已截止或額滿），本次不訂餐，也不會改訂其他日期",
+                                log_lines=log_lines, page=page,
+                            )
+                        else:
+                            target_options = [
+                                v for v in target_sel.locator("option").evaluate_all(
+                                    "els => els.map(e => e.value)"
+                                )
+                                if v.strip().isdigit()
+                            ]
+
+                            if MEAL_COUNT in target_options:
+                                target_count = MEAL_COUNT
+                            elif target_options:
+                                target_count = str(max(int(v) for v in target_options))
+                                log_detailed(
+                                    "步驟3-3 選擇日期與份數", "WARN",
+                                    f"最新日期（{target_date_str}）剩餘份數不足 {MEAL_COUNT} 份，"
+                                    f"改訂購剩餘可提供的 {target_count} 份",
+                                    log_lines=log_lines, page=page,
+                                )
+                            else:
+                                target_count = None
+
+                            if target_count:
+                                target_sel.select_option(target_count)
+                                order_date_selected = True
+                                order_report = (target_digits, target_count)
+                                log_detailed(
+                                    "步驟3-3 選擇日期與份數", "OK",
+                                    f"{target_date_str} -> {target_count} 份",
+                                    log_lines=log_lines, page=page,
+                                )
+                            else:
+                                log_detailed("步驟3-3 選擇日期與份數", "FAIL", f"最新日期（{target_date_str}）的份數選單為空", log_lines=log_lines, page=page)
                 except Exception as e:
                     log_detailed("步驟3-3 選擇日期與份數", "FAIL", str(e), log_lines=log_lines, page=page)
 
@@ -569,8 +578,13 @@ def run_automation():
                 # 3-4. 點擊送出按鈕 (B2)
                 order_summary = None
                 if not order_date_selected:
-                    step_status["order_submit"] = "未送出：沒有找到可訂購的日期/份數，避免送出空白訂單"
-                    log_detailed("步驟3-4 訂餐送出", "WARN", "沒有可訂日期，本次不送出", log_lines=log_lines, page=page)
+                    if zero_slot_message:
+                        order_summary = zero_slot_message
+                        step_status["order_submit"] = zero_slot_message
+                        log_detailed("步驟3-4 訂餐送出", "INFO", "最新日期可訂購份數為 0，本次不送出", log_lines=log_lines, page=page)
+                    else:
+                        step_status["order_submit"] = "未送出：找不到日期/份數，避免送出空白訂單"
+                        log_detailed("步驟3-4 訂餐送出", "WARN", "找不到可訂購的日期/份數，本次不送出", log_lines=log_lines, page=page)
                 else:
                     submit_btn = page.locator("input[name='B2']")
                     submit_btn.wait_for(state="visible", timeout=10000)
@@ -581,7 +595,9 @@ def run_automation():
                     target_digits, target_count = order_report
                     order_date_str = roc_digits_to_date_str(target_digits)
                     classkind_name = CLASSKIND_NAME_MAP.get(CLASSKIND_VALUE, CLASSKIND_VALUE)
-                    order_summary = f"{order_date_str} {classkind_name} {target_count}份，訂餐成功"
+                    order_summary = f"{order_date_str} {classkind_name} 實際訂購 {target_count} 份，訂餐成功"
+                    if str(target_count) != str(MEAL_COUNT):
+                        order_summary += f"（原設定 {MEAL_COUNT} 份，但剩餘份數不足）"
 
                     step_status["order_submit"] = f"成功：{order_summary}"
                     log_detailed("步驟3-4 訂餐送出", "OK", order_summary, log_lines=log_lines, page=page)
