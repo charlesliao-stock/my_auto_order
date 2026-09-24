@@ -1,5 +1,3 @@
-Content is user-generated and unverified.
-Learn about artifacts
 import os
 import re
 import time
