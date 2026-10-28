@@ -2,13 +2,13 @@ import os
 import re
 import time
 import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 from collections import Counter
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
 # 每次修改程式時請更新此版本，方便從 Actions 日誌確認實際執行的程式版本。
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 # 從 GitHub Secrets 讀取設定
 USERNAME = os.environ.get("KMUH_USERNAME")
 PASSWORD = os.environ.get("KMUH_PASSWORD")
@@ -66,6 +66,49 @@ def safe_screenshot(page, path, log_lines=None):
     except Exception as e:
         log_detailed(f"截圖失敗（{path}）", "WARN", str(e), log_lines=log_lines, page=page)
         return False
+def _redact_url_query(url):
+    """保留 URL 路徑與參數名稱，但遮蔽 query 值（例如一次性 signin token）。"""
+    try:
+        parts = urlsplit(url)
+        query = urlencode([(key, "[REDACTED]") for key, _ in parse_qsl(parts.query, keep_blank_values=True)])
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    except Exception:
+        return "[URL 遮蔽失敗]"
+def _attach_network_diagnostics(page, log_lines):
+    """只記錄主文件導覽的 URL、HTTP 狀態與失敗原因，不記錄 headers/cookies/form data。"""
+    def record(message):
+        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        line = f"[{ts}] 🌐 NET {message}"
+        print(line, flush=True)
+        log_lines.append(line)
+
+    def on_request(request):
+        try:
+            if request.is_navigation_request():
+                record(f"REQUEST method={request.method} url={_redact_url_query(request.url)}")
+        except Exception as e:
+            record(f"REQUEST event logging error={e}")
+
+    def on_response(response):
+        try:
+            if response.request.is_navigation_request():
+                record(f"RESPONSE status={response.status} url={_redact_url_query(response.url)}")
+        except Exception as e:
+            record(f"RESPONSE event logging error={e}")
+
+    def on_request_failed(request):
+        try:
+            if request.is_navigation_request():
+                record(
+                    f"REQUEST_FAILED method={request.method} url={_redact_url_query(request.url)} "
+                    f"failure={request.failure or 'unknown'}"
+                )
+        except Exception as e:
+            record(f"REQUEST_FAILED event logging error={e}")
+
+    page.on("request", on_request)
+    page.on("response", on_response)
+    page.on("requestfailed", on_request_failed)
 
 
 def _otsu_threshold(gray_img):
@@ -327,6 +370,7 @@ def run_automation():
                 page = context.new_page()
 
             log_lines = []
+            _attach_network_diagnostics(page, log_lines)
             step_status = {
                 "login": "未開始",
                 "redirect": "未開始",
@@ -341,6 +385,12 @@ def run_automation():
                     # Webportal 會重新導向 AuthServerMVC/login?signin=...；signin 是一次性
                     # 參數，不可寫死。只等導覽 commit，之後由 locator 等待登入表單或已登入首頁，
                     # 避免 AuthServer/入口頁的背景請求讓 domcontentloaded/networkidle 卡住。
+                    log_detailed(
+                        "網路診斷-導覽開始", "INFO",
+                        f"method=GET url={_redact_url_query('https://www.kmuh.org.tw/Web/Webportal')} "
+                        "wait_until=commit timeout_ms=60000",
+                        log_lines=log_lines, page=page,
+                    )
                     page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="commit", timeout=60000)
 
                     # 預期落在 AuthServer 登入頁（#username）或已登入入口首頁（TranUrl 連結）。
@@ -356,6 +406,12 @@ def run_automation():
                         log_detailed("步驟1-1 開啟登入頁", "OK", f"AuthServer 登入表單已出現，實際網址：{page.url}", log_lines=log_lines, page=page)
                 except Exception as e:
                     step_status["login"] = f"失敗：無法開啟登入頁或找不到帳號欄位（{e}）"
+                    log_detailed(
+                        "網路診斷-導覽例外", "FAIL",
+                        f"exception={type(e).__name__}; message={e}; "
+                        f"page_url={_redact_url_query(page.url)}",
+                        log_lines=log_lines, page=page,
+                    )
                     log_detailed("步驟1-1 開啟登入頁", "FAIL", str(e), log_lines=log_lines, page=page)
                     raise
 
