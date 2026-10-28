@@ -7,7 +7,8 @@ from collections import Counter
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
-
+# 每次修改程式時請更新此版本，方便從 Actions 日誌確認實際執行的程式版本。
+APP_VERSION = "1.1.0"
 # 從 GitHub Secrets 讀取設定
 USERNAME = os.environ.get("KMUH_USERNAME")
 PASSWORD = os.environ.get("KMUH_PASSWORD")
@@ -302,6 +303,8 @@ def dismiss_system_hint_modal(page, log_lines=None, wait_ms=8000):
 
 
 def run_automation():
+    commit_sha = os.environ.get("GITHUB_SHA", "local")[:7]
+    print(f"=== KMUH Auto Order version {APP_VERSION} | commit {commit_sha} ===", flush=True)
     os.makedirs("screenshots", exist_ok=True)
 
     with sync_playwright() as p:
