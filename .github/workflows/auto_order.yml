@@ -19,17 +19,18 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Diagnose KMUH and KMSH connectivity
+      - name: Diagnose GitHub runner and portal connectivity
         continue-on-error: true
         run: |
-          for host in www.kmuh.org.tw www.kmsh.org.tw; do
-            echo "=== DNS: ${host} ==="
-            getent ahosts "${host}" || true
-          done
-          for url in \
-            "https://www.kmuh.org.tw/Web/Webportal" \
-            "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"; do
-            echo "=== HTTPS: ${url} ==="
+          echo "Workflow commit: ${GITHUB_SHA}"
+          echo "Runner OS: ${RUNNER_OS}"
+          echo "=== Runner public egress IP (if external IP service is reachable) ==="
+          curl -fsS --connect-timeout 10 --max-time 20 https://api.ipify.org || true
+          echo
+          probe() {
+            label="$1"
+            url="$2"
+            echo "=== ${label}: ${url} ==="
             if curl -sS -L -o /dev/null \
               --connect-timeout 15 --max-time 30 \
               -w 'HTTP status: %{http_code}\nRemote IP: %{remote_ip}\nConnect time: %{time_connect}s\nTotal time: %{time_total}s\n' \
@@ -39,7 +40,16 @@ jobs:
               result=$?
               echo "curl exit code: ${result}"
             fi
-          done
+          }
+          echo "=== DNS: api.github.com ==="
+          getent ahosts api.github.com || true
+          echo "=== DNS: www.kmuh.org.tw ==="
+          getent ahosts www.kmuh.org.tw || true
+          echo "=== DNS: www.kmsh.org.tw ==="
+          getent ahosts www.kmsh.org.tw || true
+          probe "GitHub API control" "https://api.github.com/zen"
+          probe "KMUH portal" "https://www.kmuh.org.tw/Web/Webportal"
+          probe "KMSH direct order URL" "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
 
       - name: Install system dependencies & Tesseract OCR
         run: |
