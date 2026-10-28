@@ -335,21 +335,22 @@ def run_automation():
 
                 # ---------- 步驟 1：登入與智慧等待 ----------
                 try:
-                    # 不等待 networkidle：入口網站可能持續發出背景請求；先等 DOM 建立，
-                    # 再由下方 locator 等待登入欄位或已登入入口連結。
-                    page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=60000)
+                    # Webportal 會重新導向 AuthServerMVC/login?signin=...；signin 是一次性
+                    # 參數，不可寫死。只等導覽 commit，之後由 locator 等待登入表單或已登入首頁，
+                    # 避免 AuthServer/入口頁的背景請求讓 domcontentloaded/networkidle 卡住。
+                    page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="commit", timeout=60000)
 
-                    # 登入頁（有 #username）或「已登入的入口首頁」（有 TranUrl 連結）二擇一出現即可。
+                    # 預期落在 AuthServer 登入頁（#username）或已登入入口首頁（TranUrl 連結）。
                     # 重試時同一個瀏覽器 session 早已登入，再開入口網站會直接看到首頁，
                     # 不會再有 #username；舊版只等 #username，所以第 2、3 次重試必定逾時。
                     username_input = page.locator("#username")
-                    username_input.or_(page.locator("a[href*='TranUrl']")).first.wait_for(state="visible", timeout=30000)
+                    username_input.or_(page.locator("a[href*='TranUrl']")).first.wait_for(state="visible", timeout=45000)
                     already_logged_in = not username_input.is_visible()
                     safe_screenshot(page, f"screenshots/1_login_page_{attempt}.png", log_lines)
                     if already_logged_in:
                         log_detailed("步驟1-1 開啟入口網站", "OK", "已是登入狀態（沿用先前 session），略過登入", log_lines=log_lines, page=page)
                     else:
-                        log_detailed("步驟1-1 開啟登入頁", "OK", "登入頁面與欄位已完全載入", log_lines=log_lines, page=page)
+                        log_detailed("步驟1-1 開啟登入頁", "OK", f"AuthServer 登入表單已出現，實際網址：{page.url}", log_lines=log_lines, page=page)
                 except Exception as e:
                     step_status["login"] = f"失敗：無法開啟登入頁或找不到帳號欄位（{e}）"
                     log_detailed("步驟1-1 開啟登入頁", "FAIL", str(e), log_lines=log_lines, page=page)
