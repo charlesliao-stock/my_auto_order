@@ -19,21 +19,27 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Diagnose KMUH portal connectivity
+      - name: Diagnose KMUH and KMSH connectivity
         continue-on-error: true
         run: |
-          echo "Checking DNS and HTTPS connectivity to www.kmuh.org.tw"
-          getent ahosts www.kmuh.org.tw || true
-          if curl -sS -L -o /dev/null \
-            --connect-timeout 15 --max-time 30 \
-            -w 'HTTP status: %{http_code}\nRemote IP: %{remote_ip}\nConnect time: %{time_connect}s\nTotal time: %{time_total}s\n' \
-            https://www.kmuh.org.tw/Web/Webportal; then
-            echo "curl exit code: 0"
-          else
-            result=$?
-            echo "curl exit code: ${result}"
-          fi
-          exit 0
+          for host in www.kmuh.org.tw www.kmsh.org.tw; do
+            echo "=== DNS: ${host} ==="
+            getent ahosts "${host}" || true
+          done
+          for url in \
+            "https://www.kmuh.org.tw/Web/Webportal" \
+            "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"; do
+            echo "=== HTTPS: ${url} ==="
+            if curl -sS -L -o /dev/null \
+              --connect-timeout 15 --max-time 30 \
+              -w 'HTTP status: %{http_code}\nRemote IP: %{remote_ip}\nConnect time: %{time_connect}s\nTotal time: %{time_total}s\n' \
+              "${url}"; then
+              echo "curl exit code: 0"
+            else
+              result=$?
+              echo "curl exit code: ${result}"
+            fi
+          done
 
       - name: Install system dependencies & Tesseract OCR
         run: |
