@@ -335,8 +335,9 @@ def run_automation():
 
                 # ---------- 步驟 1：登入與智慧等待 ----------
                 try:
-                    # 智慧等待：等待 networkidle 網路閒置，並將逾時延長至 60 秒
-                    page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="networkidle", timeout=60000)
+                    # 不等待 networkidle：入口網站可能持續發出背景請求；先等 DOM 建立，
+                    # 再由下方 locator 等待登入欄位或已登入入口連結。
+                    page.goto("https://www.kmuh.org.tw/Web/Webportal", wait_until="domcontentloaded", timeout=60000)
 
                     # 登入頁（有 #username）或「已登入的入口首頁」（有 TranUrl 連結）二擇一出現即可。
                     # 重試時同一個瀏覽器 session 早已登入，再開入口網站會直接看到首頁，
