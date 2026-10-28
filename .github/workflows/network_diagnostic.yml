@@ -1,0 +1,55 @@
+name: KMUH Network Diagnostic (No Order)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report runner and connectivity (no login, no order)
+        shell: bash
+        run: |
+          set +e
+          echo "UTC time: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "Runner OS: ${RUNNER_OS}"
+          echo "Workflow commit: ${GITHUB_SHA}"
+          echo "Runner name: ${RUNNER_NAME}"
+          echo "ImageOS: ${ImageOS:-unknown}"
+          echo "ImageVersion: ${ImageVersion:-unknown}"
+
+          echo "=== Public egress IP (diagnostic only) ==="
+          curl -4 -fsS --connect-timeout 10 --max-time 20 https://api.ipify.org
+          echo
+
+          hosts=(api.github.com www.kmuh.org.tw www.kmsh.org.tw)
+          for host in "${hosts[@]}"; do
+            echo "=== DNS ${host} ==="
+            getent ahostsv4 "${host}"
+            echo "DNS exit code: $?"
+          done
+
+          probe() {
+            label="$1"
+            url="$2"
+            echo "=== ${label}: ${url} ==="
+            for attempt in 1 2 3; do
+              echo "-- attempt ${attempt}/3 --"
+              curl -4 -sS -L -o /dev/null \
+                --connect-timeout 12 --max-time 20 \
+                -w 'HTTP status: %{http_code}\nRemote IP: %{remote_ip}\nConnect time: %{time_connect}s\nTLS/app total time: %{time_total}s\n' \
+                "${url}"
+              result=$?
+              echo "curl exit code: ${result}"
+              sleep 2
+            done
+          }
+
+          probe "GitHub API control" "https://api.github.com/zen"
+          probe "KMUH portal" "https://www.kmuh.org.tw/Web/Webportal"
+          probe "KMSH order URL (network reachability only; no session)" "https://www.kmsh.org.tw/web/wwwkmhk/Nutr_Order/OrderPers.asp?br_statusKind=1"
+          echo "Diagnostic completed. This workflow did not log in or place an order."
