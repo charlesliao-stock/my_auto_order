@@ -24,12 +24,15 @@ jobs:
         run: |
           echo "Checking DNS and HTTPS connectivity to www.kmuh.org.tw"
           getent ahosts www.kmuh.org.tw || true
-          curl -sS -L -o /dev/null \
+          if curl -sS -L -o /dev/null \
             --connect-timeout 15 --max-time 30 \
             -w 'HTTP status: %{http_code}\nRemote IP: %{remote_ip}\nConnect time: %{time_connect}s\nTotal time: %{time_total}s\n' \
-            https://www.kmuh.org.tw/Web/Webportal
-          result=$?
-          echo "curl exit code: ${result}"
+            https://www.kmuh.org.tw/Web/Webportal; then
+            echo "curl exit code: 0"
+          else
+            result=$?
+            echo "curl exit code: ${result}"
+          fi
           exit 0
 
       - name: Install system dependencies & Tesseract OCR
